@@ -8,9 +8,9 @@ package app.apexview
  * values. Binary search visits at most log2(total rows) samples.
  */
 internal class RollingTimingIndex(private val nativeRequested: Boolean,
-    private val pack: (LongArray, Int) -> TimingTimestamps? = TimingTimestamps::packed) {
+    private val pack: (LongArray, Int) -> TimingTimestamps? = { values, count -> TimingTimestamps.packed(values, count) }) {
     private val sealed = ArrayList<TimingTimestamps>()
-    private var tail = LongArray(BLOCK)
+    private var tail = LongArray(32)
     private var used = 0
     val size: Int get() = sealed.size * BLOCK + used
 
@@ -25,9 +25,10 @@ internal class RollingTimingIndex(private val nativeRequested: Boolean,
             val immutable = tail
             sealed.add((if (nativeRequested) pack(immutable, BLOCK) else null)
                 ?: TimingTimestamps.jvm(immutable, BLOCK))
-            tail = LongArray(BLOCK)
+            tail = LongArray(32)
             used = 0
         }
+        if (used == tail.size) tail = tail.copyOf(minOf(BLOCK, tail.size * 2))
         tail[used++] = time
     }
     fun toLongArray(): LongArray = copyRange(0, size)
