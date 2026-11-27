@@ -223,4 +223,22 @@ class SceneCodecTimestampCorrelationTest {
         assertEquals(1L, report.duplicateLatches)
         assertEquals(1L, report.swapsAfterLatch)
     }
+
+    @Test fun independentSwapUsesSampledImageDespiteNewerLatch() {
+        val timing = SceneCodecTimestampCorrelation()
+        val owner = Any()
+        timing.attach(owner)
+        timing.onTextureLatched(owner, 1_000_000_000L, 1_010_000_000L)
+        timing.onTextureLatched(owner, 1_020_000_000L, 1_030_000_000L)
+        timing.onSampledSwapSubmitted(owner, 1_035_000_000L, 1_010_000_000L)
+        timing.onSampledSwapSubmitted(owner, 1_036_000_000L, 1_010_000_000L)
+        timing.onSampledSwapSubmitted(Any(), 1_037_000_000L, 1_030_000_000L)
+        val first = requireNotNull(timing.snapshotAndReset(owner))
+        assertEquals(1L, first.swapsAfterLatch)
+        assertEquals(25.0, first.latchToSwap.maxMs, 0.001)
+        timing.onSampledSwapSubmitted(owner, 1_038_000_000L, 1_030_000_000L)
+        val second = requireNotNull(timing.snapshotAndReset(owner))
+        assertEquals(1L, second.swapsAfterLatch)
+        assertEquals(8.0, second.latchToSwap.maxMs, 0.001)
+    }
 }
