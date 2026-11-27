@@ -244,3 +244,115 @@ mod spool_tests {
         assert_eq!(index.start_offset(100000),65535);
     }
 }
+
+
+pub const TOWER_ROWS: usize = 128;
+pub const TOWER_FIELDS: usize = 5;
+pub const TOWER_WORDS: usize = 1 + TOWER_ROWS * TOWER_FIELDS;
+const ABSENT: i64 = -1;
+const NO_POSITION: i64 = i64::MIN;
+
+/// Canonical position/gap-only TimingData record. Full lifecycle, sector,
+/// lap and supplemental semantics stay on the reference path when any
+/// unsupported field occurs. No row is committed until the entire record
+/// is validated. Strings are ASCII spans into the caller's same JSON text.
+fn text_span(p: &mut Parser<'_>) -> Option<i64> {
+    let value = p.string()?;
+    let end = p.at.checked_sub(1)?;
+    let start = end.checked_sub(value.len())?;
+    Some(((i64::try_from(start).ok()?) << 32) | i64::try_from(end).ok()?)
+}
+fn value_span(p: &mut Parser<'_>) -> Option<i64> {
+    let mut mask = 0u8;
+    let mut span = ABSENT;
+    p.object(|p,key| {
+        if key != b"Value" { return None; }
+        unique(&mut mask, 1)?;
+        span = text_span(p)?;
+        Some(())
+    })?;
+    Some(span)
+}
+fn position_value(p: &mut Parser<'_>) -> Option<i64> {
+    p.ws();
+    let position = if p.bytes.get(p.at) == Some(&b'"') {
+        std::str::from_utf8(p.string()?).ok()?.parse::<i32>().ok()?
+    } else { p.integer()? };
+    Some(i64::from(position))
+}
+pub fn tower_simple(bytes: &[u8], out: &mut [i64]) -> Option<usize> {
+    if bytes.len() > MAX_RECORD || out.len() < TOWER_WORDS || !bytes.is_ascii() { return None; }
+    let mut p = Parser { bytes, at: 0 };
+    let mut root = 0;
+    let mut rows = 0usize;
+    let mut seen = [false; 1000];
+    p.object(|p,key| {
+        if key != b"Lines" { return None; }
+        unique(&mut root, 1)?;
+        p.object(|p,key| {
+            let number = driver(key)?;
+            if rows >= TOWER_ROWS || *seen.get(number)? { return None; }
+            seen[number] = true;
+            let mut fields = 0;
+            let mut position = NO_POSITION;
+            let mut fastest = ABSENT;
+            let mut interval = ABSENT;
+            let mut leader = ABSENT;
+            let mut ahead = ABSENT;
+            p.object(|p,key| {
+                match key {
+                    b"Position" => { unique(&mut fields, 1)?; position = position_value(p)?; },
+                    b"TimeDiffToFastest" => { unique(&mut fields, 2)?; fastest = text_span(p)?; },
+                    b"IntervalToPositionAhead" => { unique(&mut fields, 4)?; interval = value_span(p)?; },
+                    b"GapToLeader" => { unique(&mut fields, 8)?; leader = value_span(p)?; },
+                    b"TimeDiffToPositionAhead" => { unique(&mut fields, 16)?; ahead = text_span(p)?; },
+                    _ => return None,
+                }
+                Some(())
+            })?;
+            let at = 1 + rows * TOWER_FIELDS;
+            out[at..at+TOWER_FIELDS].copy_from_slice(&[number as i64, position,
+                if interval != ABSENT {interval} else {fastest},
+                if fastest != ABSENT {fastest} else {leader},
+                if ahead != ABSENT {ahead} else {interval}]);
+            rows += 1;
+            Some(())
+        })
+    })?;
+    p.ws();
+    if root != 1 || p.at != bytes.len() { return None; }
+    out[0] = rows as i64;
+    Some(1 + rows * TOWER_FIELDS)
+}
+#[cfg(test)]
+mod tower_tests {
+    use super::*;
+    fn read_span(record: &[u8], span: i64) -> Option<&[u8]> {
+        if span == ABSENT { return None; }
+        record.get((span >> 32) as usize..(span & 0xffffffff) as usize)
+    }
+    #[test]
+    fn tower_gap_precedence_and_explicit_empty_values() {
+        let record = br#"{"Lines":{"44":{"Position":"2","TimeDiffToFastest":"+1.2","GapToLeader":{"Value":"3"},"IntervalToPositionAhead":{"Value":""},"TimeDiffToPositionAhead":"0.4"},"1":{"GapToLeader":{"Value":"+0.5"}}}}"#;
+        let mut out = [0;TOWER_WORDS];
+        assert_eq!(tower_simple(record,&mut out),Some(11));
+        assert_eq!(&out[..3], &[2,44,2]);
+        assert_eq!(read_span(record,out[3]),Some(b"".as_slice()));
+        assert_eq!(read_span(record,out[4]),Some(b"+1.2".as_slice()));
+        assert_eq!(read_span(record,out[5]),Some(b"0.4".as_slice()));
+        assert_eq!(&out[6..9], &[1,NO_POSITION,ABSENT]);
+        assert_eq!(read_span(record,out[9]),Some(b"+0.5".as_slice()));
+        assert_eq!(out[10],ABSENT);
+    }
+    #[test]
+    fn mixed_lifecycle_sector_and_unknown_records_decline_transactionally() {
+        let mut out=[0;TOWER_WORDS];
+        for record in [
+            br#"{"Lines":{"44":{"Position":"2"},"1":{"Retired":true}}}"#.as_slice(),
+            br#"{"Lines":{"44":{"Sectors":[]}}}"#,
+            br#"{"Lines":{"44":{"Position":"2","Position":"3"}}}"#,
+            br#"{"Lines":{"44":{"IntervalToPositionAhead":{"Value":null}}}}"#,
+            br#"{"Lines":{"44":{"GapToLeader":{"Value":"\u0031"}}}}"#,
+        ] { assert_eq!(tower_simple(record,&mut out),None); }
+    }
+}
