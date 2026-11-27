@@ -40,6 +40,10 @@ internal class BakedCastLiveSession(
     private var publishedDurationUs = 0L
     private var lastPublicationNs = 0L
     @Volatile var receiverRendering = false
+    @Volatile private var receiverBuffering = false
+    fun updateReceiverBuffering(buffering: Boolean) { receiverBuffering = buffering }
+    @Synchronized fun receiverNeedsCapture(): Boolean =
+        !stopped && receiverBuffering && pending.publishingBytes == 0L
     @Synchronized fun health(): String {
         val publicationAgeMs = if (lastPublicationNs == 0L) -1L else
             (System.nanoTime() - lastPublicationNs).coerceAtLeast(0L) / 1_000_000L

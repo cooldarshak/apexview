@@ -6,9 +6,11 @@ internal object BakedCastCapturePacing {
     /** Back off on sustained capture cost; no overlapping requests. */
     class Controller {
         private var averageMs = 40.0
-        fun nextDelayMs(requestedAtNs: Long, completedAtNs: Long): Long {
+        fun nextDelayMs(requestedAtNs: Long, completedAtNs: Long, receiverNeedsCapture: Boolean = false): Long {
             val elapsed = ((completedAtNs - requestedAtNs).coerceAtLeast(0L) / 1_000_000.0).coerceAtMost(250.0)
             averageMs = averageMs * 0.85 + elapsed * 0.15
+            // Recover only optional pacing delay, never exceed 25 fps or overlap captures.
+            if (receiverNeedsCapture) return (40.0 - elapsed).toLong().coerceAtLeast(0L)
             val interval = (averageMs * 1.1).coerceIn(40.0, 67.0)
             return (interval - elapsed).toLong().coerceAtLeast(if (averageMs > 40.0) 4L else 0L)
         }

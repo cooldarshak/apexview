@@ -167,7 +167,7 @@ internal class BakedCastCaptureWorker(
                 lastReportNs = layersReadyNs
                 frames = 0; maxCopyMs = 0; maxEncoderMs = 0
             }
-            gl.postDelayed({ requestNext() }, adaptivePacing.nextDelayMs(requestedAtNs, System.nanoTime()))
+            gl.postDelayed({ requestNext() }, adaptivePacing.nextDelayMs(requestedAtNs, System.nanoTime(), session.receiverNeedsCapture()))
         } catch (error: Exception) { fail(error) }
     }
 

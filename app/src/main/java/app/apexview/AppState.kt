@@ -367,6 +367,7 @@ class AppState(
                 }
                 if (castRemoteBuffering != remote.isBuffering) {
                     castRemoteBuffering = remote.isBuffering
+                    baked.updateReceiverBuffering(castRemoteBuffering)
                     android.util.Log.i("PitwallCast", "BAKED_RECEIVER_BUFFER buffering=$castRemoteBuffering positionMs=${remote.approximateStreamPosition} ${baked.health()}")
                 }
                 if (googleHasPlayed && remote.mediaStatus?.playerState == com.google.android.gms.cast.MediaStatus.PLAYER_STATE_IDLE) {
@@ -780,6 +781,7 @@ class AppState(
                     } else if (state in 1..2) {
                         if (duration > 0) durationMs = (duration * 1000).toLong()
                         castRemoteBuffering = body.optBoolean("buffering")
+                        bakedCastSession?.updateReceiverBuffering(castRemoteBuffering)
                         remoteCastClock.reconcile((time * 1000).toLong(), state == 1 && !castRemoteBuffering, speed.toFloat(), (duration * 1000).toLong())
                         if (castPlaybackHandedOff) { playing = state == 1; positionMs = remoteCastClock.positionMs() }
                     }
