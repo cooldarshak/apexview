@@ -49,6 +49,20 @@ class OverlayTowerSamplerTest {
         assertSame(same, sampler.sample(1_200L))
     }
 
+    @Test fun unchangedPollsReusePublicationButNeverSuppressNewTelemetryOrSeek() {
+        val session = timing()
+        val sampler = OverlayTowerSampler(session)
+        val initial = sampler.sample(1_100L)
+        for (clock in 1_101L..1_150L) assertSame(initial, sampler.sample(clock))
+        val next = sampler.sample(1_700L)
+        assertNotSame(initial, next)
+        assertEquals(270, next.speeds.getValue("44").first)
+        val restored = sampler.sample(1_100L)
+        assertEquals(initial.rows, restored.rows)
+        assertEquals(initial.speeds, restored.speeds)
+        assertEquals(initial.normalizedSectors, restored.normalizedSectors)
+    }
+
     @Test fun geometryOnlyUpdateKeepsRowsAndRetainsTheNewTelemetrySource() {
         val original = timing()
         val sampler = OverlayTowerSampler(original)

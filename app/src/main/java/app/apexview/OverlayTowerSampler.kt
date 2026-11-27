@@ -109,18 +109,27 @@ internal class OverlayTowerSampler(
         scratchSectors.keys.retainAll(rowCache.keys)
         for ((number, row) in rows) scratchSectors[number] = sectorNormalizer.sample(number, row)
         sectorNormalizer.retainOnly(scratchSectors.keys)
-        val candidate = TowerSample(
-            previousSample?.rows?.takeIf { it == rows } ?: rows.toList(),
-            previousSample?.header?.takeIf { it == header } ?: header,
-            previousSample?.tyres?.takeIf { old ->
-                old.size == tyres.size && tyres.all { (number, tyre) ->
-                    val prior = old[number]
-                    old.containsKey(number) && prior?.compound == tyre?.compound && prior?.laps == tyre?.laps
-                }
-            } ?: HashMap(tyres),
-            previousSample?.speeds?.takeIf { it == speeds } ?: HashMap(speeds),
-            previousSample?.normalizedSectors?.takeIf { it == scratchSectors } ?: HashMap(scratchSectors),
-        )
+        val publishedRows = previousSample?.rows?.takeIf { it == rows } ?: rows.toList()
+        val publishedHeader = previousSample?.header?.takeIf { it == header } ?: header
+        val publishedTyres = previousSample?.tyres?.takeIf { old ->
+            old.size == tyres.size && tyres.all { (number, tyre) ->
+                val prior = old[number]
+                old.containsKey(number) && prior?.compound == tyre?.compound && prior?.laps == tyre?.laps
+            }
+        } ?: HashMap(tyres)
+        val publishedSpeeds = previousSample?.speeds?.takeIf { it == speeds } ?: HashMap(speeds)
+        val publishedSectors = previousSample?.normalizedSectors?.takeIf { it == scratchSectors } ?: HashMap(scratchSectors)
+        // All components are the previous immutable values: no candidate
+        // allocation or second deep comparison on an unchanged poll.
+        if (previousSample != null && publishedRows === previousSample.rows &&
+            publishedHeader === previousSample.header && publishedTyres === previousSample.tyres &&
+            publishedSpeeds === previousSample.speeds && publishedSectors === previousSample.normalizedSectors) {
+            lastMs = now
+            lastSpeedSource = speedSource
+            probe?.record(System.nanoTime() - started, rows.size, 0)
+            return previousSample
+        }
+        val candidate = TowerSample(publishedRows, publishedHeader, publishedTyres, publishedSpeeds, publishedSectors)
         val previous = last
         val same = previous != null && previous.visuallyEquals(candidate)
         val changedRows = if (same || probe == null) 0 else {
