@@ -135,7 +135,8 @@ class PitwallReceiverActivity : ComponentActivity() {
             }.map { group to it }
         }
         val formats = candidates.map { (group, index) -> group.getTrackFormat(index) }
-        receiverCaptionTracks = CaptionPolicy.tracks(formats.map { it.language to it.label })
+        receiverCaptionTracks = if (isBakedPlayback()) emptyList()
+            else CaptionPolicy.tracks(formats.map { it.language to it.label })
         receiverCaptionTrackCount = receiverCaptionTracks.size
         val preference = if (captionsOn && !isBakedPlayback()) CaptionPolicy.preferredIndex(
             captionLanguage, "en", formats.map { it.language },
@@ -713,9 +714,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             // default HLS extractor does not detect access-unit boundaries.
             // Scope the change to authenticated clear baked AVC/AAC only.
             Log.i("PitwallReceiver", "BAKED_HLS_EXTRACTOR detectAccessUnits=true")
-            androidx.media3.exoplayer.hls.HlsMediaSource.Factory(data).setExtractorFactory(
-                androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory(
-                    androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS, true))
+            androidx.media3.exoplayer.hls.HlsMediaSource.Factory(data).setExtractorFactory(BakedHlsExtractorFactory())
         } else DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } }
         val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
             .setMediaSourceFactory(sourceAllocations.factory(mediaFactory,

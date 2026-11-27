@@ -6,14 +6,11 @@ import androidx.media3.common.Format
 import androidx.media3.common.util.TimestampAdjuster
 import androidx.media3.extractor.DefaultExtractorInput
 import androidx.media3.extractor.DiscardingTrackOutput
-import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorOutput
-import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import androidx.media3.extractor.TrackOutput
-import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
-import androidx.media3.extractor.ts.TsExtractor
 import java.io.File
+import app.apexview.cast.local.BakedHlsExtractorFactory
 import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -47,9 +44,7 @@ class BakedMedia3ExtractorTest {
             override fun endTracks() {}
             override fun seekMap(seekMap: SeekMap) {}
         }
-        @Suppress("DEPRECATION")
-        val extractor = TsExtractor(TsExtractor.MODE_HLS, TimestampAdjuster(0),
-            DefaultTsPayloadReaderFactory(DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS))
+        val extractor = BakedHlsExtractorFactory.Chunk(TimestampAdjuster(0))
         extractor.init(output)
         try {
             repeat(2) { segment ->
@@ -64,24 +59,19 @@ class BakedMedia3ExtractorTest {
                     }
                 }
                 val input = DefaultExtractorInput(reader, 0L, bytes.size.toLong())
-                val position = PositionHolder()
-                while (true) {
-                    val result = extractor.read(input, position)
-                    if (result == Extractor.RESULT_END_OF_INPUT) break
-                    assertEquals(Extractor.RESULT_CONTINUE, result)
-                }
+                while (extractor.read(input)) {}
+                assertEquals("Complete video access units at segment boundary", (segment + 1) * 25,
+                    timestamps[C.TRACK_TYPE_VIDEO].orEmpty().size)
             }
             assertEquals("video/avc", formats[C.TRACK_TYPE_VIDEO]?.sampleMimeType)
             assertEquals("audio/mp4a-latm", formats[C.TRACK_TYPE_AUDIO]?.sampleMimeType)
             val video = timestamps[C.TRACK_TYPE_VIDEO].orEmpty()
             val audio = timestamps[C.TRACK_TYPE_AUDIO].orEmpty()
-            // Media3 1.11.1 has a separate EOF flush defect: the last pending
-            // picture may need the next segment's boundary. Do not treat this
-            // test as full end-of-stream acceptance until that defect is fixed.
-            assertTrue("Only ${video.size} video access units", video.size >= 48)
-            assertTrue("Only ${audio.size} audio access units", audio.size >= 90)
+            assertEquals(50, video.size)
+            assertEquals(94, audio.size)
+            assertEquals(0, formats.keys.count { it == C.TRACK_TYPE_TEXT })
             assertTrue(video.zipWithNext().all { (a,b) -> b > a })
             assertTrue(audio.zipWithNext().all { (a,b) -> b > a })
-        } finally { extractor.release() }
+        } finally { /* Chunk owns only Media3 parser state, no external resources. */ }
     }
 }
