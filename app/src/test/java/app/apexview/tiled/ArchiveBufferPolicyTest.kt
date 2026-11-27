@@ -9,6 +9,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class ArchiveBufferPolicyTest {
+    @Test fun ampleLocalMedia3BufferAvoidsSecondSpeculativeGroupOnlyWithFreshClock() {
+        val demand = ArchiveBufferPolicy.NativeDemand(1000, 30_000, 1f, true, 1000)
+        assertEquals(1, ArchiveBufferPolicy.localWarmLimit(2, demand, 2000, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand, 4000, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand, 2000, false))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand.copy(advancing = false), 2000, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand.copy(bufferedMs = 24_999), 2000, true))
+    }
+
     @Test fun localDeliveryRetiresOnlyOlderDeliveredUnpinnedBackingInSameEpoch() {
         val cache = BoundedArchiveFragmentCache(6, 100)
         val old = byteArrayOf(1, 2)

@@ -27,6 +27,19 @@ pub(crate) fn reusable_capacity(size:usize, capacity:usize)->bool {
     size <= capacity && capacity <= size.saturating_add((size / 8).min(MAX_REUSE_SLACK))
 }
 
+// Build 910: 172 outputs varied 7.6–9.5 MiB, 47 undersize misses.
+// Round only already admitted multi-MiB allocation within original reuse
+// slack, worker ceiling and idle permit. No new pool or larger cap.
+#[cfg(any(target_os = "android", test))]
+fn atlas_reservation(size: usize, ceiling: usize, idle_limit: usize) -> usize {
+    const CLASS: usize = 512 * 1024;
+    if size < 4 * 1024 * 1024 { return size; }
+    let rounded = size.saturating_add(CLASS - 1) / CLASS * CLASS;
+    if rounded <= ceiling && rounded <= idle_limit && reusable_capacity(size, rounded) {
+        rounded
+    } else { size }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct Arena {
@@ -196,9 +209,14 @@ impl Arena {
                 self.note_atlas_growth(false);
             }
             let mut b=Vec::new();
-            if b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
-                self.owned_alloc_failures=self.owned_alloc_failures.saturating_add(1);
-                return None;
+            let reservation = atlas_reservation(size, ceiling, self.atlas_idle_limit);
+            if b.try_reserve_exact(reservation).is_err() || b.capacity()>ceiling ||
+                !reusable_capacity(size,b.capacity()) {
+                b=Vec::new();
+                if reservation == size || b.try_reserve_exact(size).is_err() || b.capacity()>ceiling {
+                    self.owned_alloc_failures=self.owned_alloc_failures.saturating_add(1);
+                    return None;
+                }
             }
             b.resize(size,0);
             self.owned_allocations=self.owned_allocations.saturating_add(1);
@@ -604,6 +622,26 @@ mod tests {
         assert!(next.iter().all(|&v|v==0));
         a.trim_pressure();
         assert_eq!(a.charged,0);
+    }
+
+    #[test]
+    fn measured_atlas_size_class_reuses_nearby_growth_within_original_cap() {
+        let mib=1024*1024;
+        let mut a=Arena::default();
+        let ceiling=10*mib;
+        a.set_atlas_idle_limit(ceiling);
+        let size=8*mib+64*1024;
+        let b=a.take_output(size,ceiling).unwrap();
+        let cap=b.capacity(); let ptr=b.as_ptr();
+        assert_eq!(cap,8*mib+512*1024);
+        let id=a.adopt(cap,size,0,size,ceiling,||Some(b)).unwrap();
+        assert!(a.release(id));
+        let next=a.take_output(size+128*1024,ceiling).unwrap();
+        assert_eq!(next.as_ptr(),ptr);
+        assert_eq!(a.owned_reuses,1);
+        assert_eq!(atlas_reservation(size,size,size),size);
+        assert_eq!(atlas_reservation(size,ceiling,size),size);
+        a.trim_pressure();
     }
 
     #[test]

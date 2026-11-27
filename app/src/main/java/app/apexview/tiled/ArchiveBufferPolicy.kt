@@ -283,6 +283,24 @@ internal class BoundedArchiveFragmentCache(
         recordMemory()
         return freed
     }
+    /** Current local playback clock proves an older fully delivered fragment is no longer needed for retry. */
+    @Synchronized fun retirePlayed(before: Int, epoch: Long): Long {
+        var freed = 0L
+        val iterator = entries.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key >= before || entry.value.localDeliveryEpoch != epoch) continue
+            if (entry.value.readers != 0) {
+                entry.value.retireAfterLastReader = true
+                continue
+            }
+            freed += entry.value.size
+            iterator.remove()
+            retire(entry.value)
+        }
+        if (freed > 0L) recordMemory()
+        return freed
+    }
     @Synchronized fun contains(number: Int): Boolean = entries.containsKey(number)
     @Synchronized fun readCopy(number: Int): ByteArray? = entries[number]?.copyBytes()
 
@@ -514,6 +532,13 @@ internal object ArchiveBufferPolicy {
         val mediaAllowance = maxOf(durationMs.toDouble(), minOf(untilStart, remainingBuffered))
         return (mediaAllowance / demand.speed).toLong().coerceIn(1L, 5_000L)
     }
+
+    /** Build 910 held 50–56s of Media3 data and up to two extra compressed
+     * groups. With fresh advancing local clock and >=25s, avoid second speculative group. */
+    fun localWarmLimit(limit: Int, demand: NativeDemand?, nowMs: Long, localOnly: Boolean): Int =
+        if (localOnly && demand != null && demand.advancing && nowMs >= demand.observedMs &&
+            nowMs - demand.observedMs <= 2_000L && demand.bufferedMs >= 25_000L)
+            minOf(limit, 1) else limit
 
     /** Restrict speculative groups only, based on observed transfer sizes.
      * JVM/native foreground and manual quality choices are never gated here. */

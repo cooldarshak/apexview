@@ -108,6 +108,10 @@ internal class HevcArchiveVodSession(
     fun updateNativePlaybackDemand(positionMs: Long, bufferedMs: Long, speed: Float, advancing: Boolean) {
         nativeDemand = ArchiveBufferPolicy.NativeDemand(positionMs.coerceAtLeast(0L), bufferedMs.coerceAtLeast(0L),
             speed, advancing, android.os.SystemClock.elapsedRealtime())
+        if (advancing && positionMs >= 0L) synchronized(cacheLock) {
+            if (!closed && owners.get() == 1 && !baseReleased.get())
+                cache.retirePlayed(segmentAt(ArchiveTimelineSearch.msToUs(positionMs)), localDeliveryEpoch)
+        }
     }
 
     /** Enable only for an explicit Rust request. No arena allocation in G-A. */
@@ -382,14 +386,18 @@ internal class HevcArchiveVodSession(
                 "GC_ARCHIVE_PRESSURE_TRIM behindBytes=$freed foregroundUnchanged=true")
         }
         val observed = nativeBudgetObservation.sizes()
-        val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)
+        val localLimit = ArchiveBufferPolicy.localWarmLimit(warmLimit, nativeDemand,
+            android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get())
+        val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)
         synchronized(warmLock) {
             if (!closed && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)
                 warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
-                        if (closed || Thread.currentThread().isInterrupted || candidate - number > warmLimit) break
+                        val currentLimit = ArchiveBufferPolicy.localWarmLimit(warmLimit, nativeDemand,
+                            android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get())
+                        if (closed || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break
                         val currentMemory = nativeBudgetContext?.let { context ->
                             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
                         }
@@ -881,8 +889,16 @@ internal class HevcArchiveVodSession(
         first.sampleTimings.first().sampleFlags?.let { (it and 0x00010000L) == 0L } == true
     }
 
+    // Preflight and local DASH previously built the same immutable manifest.
+    private var manifestBacking: HeapFragmentLease? = null
     fun manifest(): ByteArray = synchronized(cacheLock) {
-        checkOpen()
+        checkOpen(); manifestOwner().copyBytes()
+    }
+    private fun manifestLease(): ArchiveFragmentLease = synchronized(cacheLock) {
+        checkOpen(); ArchiveFragmentLease.shared(manifestOwner())
+    }
+    private fun manifestOwner(): HeapFragmentLease {
+        manifestBacking?.let { return it }
         val pto = requireNotNull(presentationOffsetTicks) { "Archive session is not prepared" }
         val timeline = groups.joinToString("") { "<S t=\"${pto + scaleUs(it.startUs, timescale)}\" d=\"${scaleUs(it.durationUs, timescale)}\"/>" }
         val urls = groups.indices.joinToString("") { "<SegmentURL media=\"s-$it.m4s\"/>" }
@@ -890,12 +906,13 @@ internal class HevcArchiveVodSession(
         // Preserve the verified HLS epoch as presentation metadata. Media3 intentionally leaves
         // static DASH windowStartTimeMs unset; FeedPlayer uses archiveStartTimeMs for overlays.
         val epoch = archiveStartTimeMs?.let { " availabilityStartTime=\"${java.time.Instant.ofEpochMilli(it)}\"" }.orEmpty()
-        """<?xml version="1.0" encoding="UTF-8"?>
+        val bytes = """<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" minBufferTime="PT1S" mediaPresentationDuration="PT${duration}S"$epoch>
 <Period id="archive-grid" start="PT0S" duration="PT${duration}S"><AdaptationSet contentType="video" mimeType="video/mp4" segmentAlignment="true">
 <Representation id="archive-grid" codecs="hvc1" width="$width" height="$height" bandwidth="${inputs.sumOf { it.format?.bitrate?.coerceAtLeast(0) ?: 0 }.coerceAtLeast(1)}">
 <SegmentList timescale="$timescale" presentationTimeOffset="$pto" startNumber="0"><Initialization sourceURL="init.mp4"/><SegmentTimeline>$timeline</SegmentTimeline>$urls</SegmentList>
 </Representation></AdaptationSet></Period></MPD>""".toByteArray()
+        return HeapFragmentLease.take(bytes).also { manifestBacking = it }
     }
 
     fun hlsPlaylist(): String = buildString {
@@ -957,6 +974,9 @@ internal class HevcArchiveVodSession(
             val initOwner = initialization
             initialization = null
             retirement.run { initOwner?.close() }
+            val manifestOwner = manifestBacking
+            manifestBacking = null
+            retirement.run { manifestOwner?.close() }
             retirement.run { cache.clear() }
             retirement.run { sourceInitialization.close() }
         }
@@ -980,7 +1000,7 @@ internal class HevcArchiveVodSession(
         override fun open(spec: DataSpec): Long {
             close(); uri = spec.uri
             val body = when (val name = spec.uri.lastPathSegment) {
-                "manifest.mpd" -> ArchiveFragmentLease.owned(session.manifest())
+                "manifest.mpd" -> session.manifestLease()
                 "init.mp4" -> session.initializationLease()
                 else -> {
                     val number = name?.let { Regex("s-(\\d+)\\.m4s").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }

@@ -4,6 +4,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class BoundedArchiveFragmentCacheTest {
+    @Test fun playbackClockRetiresOnlyDeliveredPastEpochAndNeverUnreadOrLeasedData() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 4, maxBytes = 64)
+        val old = ByteArray(8) { 3 }
+        val unread = ByteArray(8) { 4 }
+        cache.put(1, old); cache.put(2, unread)
+        val lease = requireNotNull(cache.readLease(1))
+        cache.completeLocalDelivery(1, lease, 9)
+        assertEquals(0L, cache.retirePlayed(2, 10))
+        assertEquals(0L, cache.retirePlayed(2, 9))
+        assertTrue(cache.contains(1))
+        lease.close()
+        assertFalse(cache.contains(1))
+        assertTrue(cache.contains(2))
+        assertArrayEquals(ByteArray(8), old)
+        cache.clear()
+    }
+
     @Test fun boundedByBytesEvenWhenThreeEntriesWouldFit() {
         val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 12)
         val eldest = ByteArray(7) { 7 }
