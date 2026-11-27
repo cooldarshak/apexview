@@ -12,7 +12,8 @@ import java.util.RandomAccess
  * to the original list; no field is silently truncated.
  */
 internal class CompactDriverSnapshots private constructor(
-    private val rows: NativeHotPath.CompactTelemetry,
+    private val rows: NativeHotPath.CompactTelemetry?,
+    private val deltas: NativeHotPath.CompactSnapshotDeltas?,
     override val size: Int,
     private val sectorLists: List<List<SectorCell?>?>,
     private val cells: List<SectorCell?>,
@@ -25,26 +26,33 @@ internal class CompactDriverSnapshots private constructor(
         if (index !in indices) throw IndexOutOfBoundsException("Snapshot $index")
         latest?.let { if (it.index == index) return it.snapshot }
         val start = index * FIELDS
-        val flags = rows.at(start + 5)
+        val decoded = deltas?.let { owner -> scratch.get()!!.also { owner.read(index, it) } }
+        fun field(column: Int): Int = decoded?.get(column) ?: requireNotNull(rows).at(start + column)
+        val flags = field(5)
         val value = DriverLaps.Snapshot(
-            rows.at(start).let { if (it == 0) null else it - 1 },
-            requireNotNull(sectorLists[rows.at(start + 1)]),
-            requireNotNull(sectorLists[rows.at(start + 2)]),
-            cells[rows.at(start + 3)],
-            strings[rows.at(start + 4)],
+            field(0).let { if (it == 0) null else it - 1 },
+            requireNotNull(sectorLists[field(1)]),
+            requireNotNull(sectorLists[field(2)]),
+            cells[field(3)],
+            strings[field(4)],
             flags and 1 != 0,
-            strings[rows.at(start + 6)],
-            strings[rows.at(start + 7)],
+            strings[field(6)],
+            strings[field(7)],
             flags and 2 != 0,
-            cells[rows.at(start + 8)],
+            cells[field(8)],
             flags and 4 != 0
         )
         latest = Decoded(index, value)
         return value
     }
 
-    fun retiredAt(index: Int): Boolean =
-        index in indices && rows.at(index * FIELDS + 5) and 2 != 0
+    fun retiredAt(index: Int): Boolean {
+        if (index !in indices) return false
+        latest?.let { if (it.index == index) return it.snapshot.retired }
+        val flags = deltas?.let { owner -> scratch.get()!!.also { owner.read(index, it) }[5] }
+            ?: requireNotNull(rows).at(index * FIELDS + 5)
+        return flags and 2 != 0
+    }
 
     private class DictionaryLimit : RuntimeException()
     private class Dictionary<T : Any> {
@@ -64,6 +72,8 @@ internal class CompactDriverSnapshots private constructor(
 
     companion object {
         private const val FIELDS = 9
+        // One tiny reusable buffer per reading thread, never a full snapshot array.
+        private val scratch = ThreadLocal.withInitial { IntArray(FIELDS) }
         private const val MAX_TEMP_FIELDS = 2_000_000
         fun freeze(source: List<DriverLaps.Snapshot>): CompactDriverSnapshots? {
             if (source is CompactDriverSnapshots) return source
@@ -88,8 +98,9 @@ internal class CompactDriverSnapshots private constructor(
                     data[start + 7] = strings.id(state.ahead)
                     data[start + 8] = cells.id(state.bestLap)
                 }
-                val packed = NativeHotPath.compactTelemetry(data, data.size, 16) ?: return null
-                return CompactDriverSnapshots(packed, source.size, sectors.values, cells.values, strings.values)
+                val delta = NativeHotPath.compactSnapshotDeltas(data, source.size)
+                val packed = if (delta == null) NativeHotPath.compactTelemetry(data, data.size, 16) ?: return null else null
+                return CompactDriverSnapshots(packed, delta, source.size, sectors.values, cells.values, strings.values)
             } catch (_: DictionaryLimit) {
                 return null
             } finally {
