@@ -36,4 +36,10 @@ class BakedCastCapturePacingTest {
         assertEquals(0L, BakedCastCapturePacing.delayMs(start, start + 60_000_000L))
         assertEquals(0L, BakedCastCapturePacing.delayMs(start, start + 250_000_000L))
     }
+    @org.junit.Test fun receiverBufferingRecoversOnlyOptionalDelay() {
+        val pacing = BakedCastCapturePacing.Controller()
+        repeat(8) { pacing.nextDelayMs(1_000_000_000L, 1_080_000_000L) }
+        org.junit.Assert.assertEquals(0L, pacing.nextDelayMs(1_000_000_000L, 1_080_000_000L, true))
+        org.junit.Assert.assertEquals(25L, pacing.nextDelayMs(1_000_000_000L, 1_015_000_000L, true))
+    }
 }

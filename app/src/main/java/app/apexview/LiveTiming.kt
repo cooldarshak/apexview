@@ -1207,9 +1207,18 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                                         val covered = preview.values.any { it.hasPositionAt(target) }
                                         // Revisit bytes already spooled, not only future records.
                                         // This handles backward seeks during a slow HTTP download.
+                                        // A forward download must not repeatedly decode the
+                                        // same 210-second prefix every few hundred ms.
+                                        // A seek outside the published window is still immediate;
+                                        // covered playback refreshes only on new lookahead.
+                                        val moved = lastAttemptOffset == Long.MIN_VALUE ||
+                                            kotlin.math.abs(offset - lastAttemptOffset) >= 10_000L
+                                        val grew = lastAttemptThrough == Long.MIN_VALUE ||
+                                            index.throughMs - lastAttemptThrough >= 5_000L
                                         if (!index.chronological || index.throughMs < offset ||
                                             (covered && target <= coveredThrough - 10_000L) ||
                                             now - lastAttemptAt < 400L ||
+                                            (!moved && !grew && covered) ||
                                             (lastAttemptThrough == index.throughMs &&
                                                 lastAttemptOffset == offset)) continue
                                         lastAttemptAt = now

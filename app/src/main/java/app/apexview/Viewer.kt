@@ -733,6 +733,7 @@ internal fun BakedPresentationCanvas(app: AppState, window: android.view.Window,
     val width = sourceWidth.toFloat()
     val height = sourceHeight.toFloat()
     val density = LocalDensity.current
+    LaunchedEffect(app.layoutRequest, session) { app.layoutIfRequested(width, height) }
     val overlay = remember(session) { BakedCastOverlay({ BakedCastVideoPlacement.viewer(1f, 1f, 0f) }, Ink.background.toArgb()) }
     val reducedMotion = LocalReduceMotion.current
     val motion = if (reducedMotion) 0 else Motion.SCREEN_MS
@@ -1215,6 +1216,13 @@ internal fun PlaybackVideoCanvas(
 ) {
     val scene = app.videoScene(width, height)
     val host = app.singleDecoderScenePlayer ?: app.protectedRollingScenePlayer
+    // A private clear presentation must never fall through to ordinary or
+    // protected source-player rendering when the composed archive changes.
+    if (captureOverlay != null && (host?.archiveSceneSession == null || app.protectedRollingSceneActive)) {
+        val invalid = app.bakedCastSession
+        LaunchedEffect(invalid) { invalid?.captureFailed("Authorized clear scene changed") }
+        return
+    }
     val secureRolling = app.protectedRollingSceneActive && host != null && !host.usesSoftwareDrm
     // Window PixelCopy is used for baked Cast and replay. Independently
     // composited clear SurfaceView is A/B-only and must not silently break
@@ -1387,7 +1395,10 @@ internal fun PlaybackVideoCanvas(
             // Capture-compatible TextureView, also the controlled A/B baseline.
             AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
                 onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
-                onFailure = app::failSingleDecoderScene
+                onFailure = { reason ->
+                    if (captureOverlay != null) bakedSession?.captureFailed(reason)
+                    else app.failSingleDecoderScene(reason)
+                }
                 onOutputSize = app::reportSceneOutputSize
                 onOutputLost = { composedGlReady = false }
                 onFirstFrame = { composedGlReady = true }
