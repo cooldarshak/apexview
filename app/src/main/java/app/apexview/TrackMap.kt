@@ -1004,7 +1004,7 @@ internal fun leaderAt(timing: SessionTiming, now: Long): String? {
     var first: String? = null
     var minPosition = 0
     for ((number, laps) in timing.laps) {
-        val index = laps.times.floorIndex(now)
+        val index = laps.snapshotTimeline.floorIndex(now)
         if (index < 0) continue
         val position = laps.states[index].position ?: continue
         if (first == null || position < minPosition) {

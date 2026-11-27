@@ -107,7 +107,7 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 }
                 val states = input.readByDriver {
                     val times = readTimes()
-                    StateLog(times, Array(times.size) { LapState.entries[readUnsignedByte()] })
+                    StateLog(timestamps.freezeTimeline(times, times.size), Array(times.size) { LapState.entries[readUnsignedByte()] })
                 }
                 val laps = input.readByDriver {
                     val times = readTimes()
@@ -143,7 +143,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     val crossings = readTimes()
                     val lapTimes = readTimes()
                     val lapCounts = IntArray(lapTimes.size) { readInt() }
-                    DriverLaps(times, snapshots, crossings, lapTimes, lapCounts)
+                    DriverLaps(timestamps.freezeTimeline(times, times.size), snapshots,
+                        timestamps.freezeTimeline(crossings, crossings.size), timestamps.freezeTimeline(lapTimes, lapTimes.size), lapCounts)
                 }
                 val parts = List(input.count(MAX_SAMPLES, 12)) { input.readLong() to input.readInt() }
                 val towerFrom = if (previewPositionMs != null) input.readLong() else null
@@ -202,8 +203,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                 FloatArray(end - range.first) { track.yAt(range.first + it) }, end - range.first)
         }.toMap()
         val states = if (!hasTower) emptyMap() else session.states.mapNotNull { (number, state) ->
-            val range = historyWindowRange(state.t.size, towerFrom, towerThrough) { state.t[it] } ?: return@mapNotNull null
-            number to StateLog(state.t.copyOfRange(range.first, range.last + 1), state.s.copyOfRange(range.first, range.last + 1))
+            val range = historyWindowRange(state.timeline.size, towerFrom, towerThrough) { state.timeline[it] } ?: return@mapNotNull null
+            number to StateLog(state.timeline.copyOfRange(range.first, range.last + 1), state.s.copyOfRange(range.first, range.last + 1))
         }.toMap()
         val laps = if (!hasTower) emptyMap() else session.laps.mapNotNull { (number, history) ->
             checkActive()
@@ -275,11 +276,11 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                     }
                 }
                 output.writeByDriver(core.states) { state ->
-                    writeTimes(state.t)
+                    writeTimes(state.timeline)
                     state.s.forEach { writeByte(it.ordinal) }
                 }
                 output.writeByDriver(core.laps) { history ->
-                    writeTimes(history.times)
+                    writeTimes(history.snapshotTimeline)
                     // Snapshots share sector cells; store each object once and refer to its index.
                     val cells = LinkedHashMap<SectorCell, Int>()
                     fun remember(cell: SectorCell?) {
@@ -308,8 +309,8 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
                         cell(snapshot.bestLap)
                         writeBoolean(snapshot.stopped)
                     }
-                    writeTimes(history.crossings)
-                    writeTimes(history.lapTimes)
+                    writeTimes(history.crossingTimeline)
+                    writeTimes(history.lapTimeline)
                     history.lapCounts.forEach { writeInt(it) }
                 }
                 output.writeInt(core.parts.size)
@@ -359,9 +360,9 @@ internal class ReplayCoreCache(directory: File, private val contentId: Long,
 
     private fun DataInputStream.readTimes() = LongArray(count(MAX_SAMPLES, Long.SIZE_BYTES)) { readLong() }
 
-    private fun DataOutputStream.writeTimes(times: LongArray) {
+    private fun DataOutputStream.writeTimes(times: TimingTimestamps) {
         writeInt(times.size)
-        times.forEach { writeLong(it) }
+        for (i in times.indices) writeLong(times[i])
     }
 
     private fun DataInputStream.readSector() = SectorCell(

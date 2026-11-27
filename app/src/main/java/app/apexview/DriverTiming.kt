@@ -128,37 +128,51 @@ internal fun historyWindowRange(size: Int, from: Long, until: Long, at: (Int) ->
     return floor(from).coerceAtLeast(0)..floor(until)
 }
 
-class DriverLaps(
-    internal val times: LongArray,
+class DriverLaps internal constructor(
+    internal val snapshotTimeline: TimingTimestamps,
     internal val states: List<Snapshot>,
-    internal val crossings: LongArray,
-    /** When the driver's completed-lap count changed, and to what (F1's NumberOfLaps). */
-    internal val lapTimes: LongArray = LongArray(0),
+    internal val crossingTimeline: TimingTimestamps,
+    /** When the driver's completed-lap count changed, and to what. */
+    internal val lapTimeline: TimingTimestamps,
     internal val lapCounts: IntArray = IntArray(0),
     internal val initialPosition: Int? = states.firstOrNull()?.position,
 ) {
+    constructor(times: LongArray, states: List<Snapshot>, crossings: LongArray,
+                lapTimes: LongArray = LongArray(0), lapCounts: IntArray = IntArray(0),
+                initialPosition: Int? = states.firstOrNull()?.position) :
+        this(TimingTimestamps.jvm(times, times.size), states,
+            TimingTimestamps.jvm(crossings, crossings.size), TimingTimestamps.jvm(lapTimes, lapTimes.size),
+            lapCounts, initialPosition)
+
+    internal val times: LongArray get() = snapshotTimeline.legacyArray()
+    internal val crossings: LongArray get() = crossingTimeline.legacyArray()
+    internal val lapTimes: LongArray get() = lapTimeline.legacyArray()
+    internal fun compact(pool: SpeedTimestampPool): DriverLaps =
+        DriverLaps(snapshotTimeline.compact(pool), states, crossingTimeline.compact(pool),
+            lapTimeline.compact(pool), lapCounts, initialPosition)
+
     internal fun shiftedBy(offsetMs: Long) = DriverLaps(
-        times.shiftedBy(offsetMs), states, crossings.shiftedBy(offsetMs), lapTimes.shiftedBy(offsetMs), lapCounts, initialPosition,
+        snapshotTimeline.shiftedBy(offsetMs), states, crossingTimeline.shiftedBy(offsetMs), lapTimeline.shiftedBy(offsetMs), lapCounts, initialPosition,
     )
 
     /** A bounded immutable UI/cache window. Preserve original rank baseline,
-     * lap counter, previous crossings and the actual beginning of an ongoing pit spell. */
+     * lap counter, previous crossingTimeline and the actual beginning of an ongoing pit spell. */
     internal fun previewWindow(from: Long, until: Long): DriverLaps? {
-        val range = historyWindowRange(times.size, from, until) { times[it] } ?: return null
+        val range = historyWindowRange(snapshotTimeline.size, from, until) { snapshotTimeline[it] } ?: return null
         var first = range.first
         if (states[first].inPit) while (first > 0 && states[first - 1].inPit) first--
         val end = range.last + 1
-        val crossingRange = historyWindowRange(crossings.size, from, until) { crossings[it] }
-        val lapRange = historyWindowRange(lapTimes.size, from, until) { lapTimes[it] }
-        return DriverLaps(times.copyOfRange(first, end), states.subList(first, end).toList(),
-            crossingRange?.let { crossings.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
-            lapRange?.let { lapTimes.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
+        val crossingRange = historyWindowRange(crossingTimeline.size, from, until) { crossingTimeline[it] }
+        val lapRange = historyWindowRange(lapTimeline.size, from, until) { lapTimeline[it] }
+        return DriverLaps(snapshotTimeline.copyOfRange(first, end), states.subList(first, end).toList(),
+            crossingRange?.let { crossingTimeline.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
+            lapRange?.let { lapTimeline.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
             lapRange?.let { lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0),
             initialPosition)
     }
 
     internal fun withInitialPosition(position: Int?): DriverLaps =
-        DriverLaps(times, states, crossings, lapTimes, lapCounts, position)
+        DriverLaps(snapshotTimeline, states, crossingTimeline, lapTimeline, lapCounts, position)
 
     class Snapshot(
         val position: Int?,
@@ -178,10 +192,10 @@ class DriverLaps(
     /**
      * The lap the driver was on at [utcMs]: one more than F1's count of laps completed then.
      * Null before the first count received (a live feed joined mid-session knows nothing
-     * earlier). Counting crossings instead started every live session at lap 1.
+     * earlier). Counting crossingTimeline instead started every live session at lap 1.
      */
     fun lapAt(utcMs: Long): Int? {
-        val i = lapTimes.floorIndex(utcMs)
+        val i = lapTimeline.floorIndex(utcMs)
         return if (i < 0) null else lapCounts[i] + 1
     }
 
@@ -190,8 +204,8 @@ class DriverLaps(
         val stops = mutableListOf<Pair<Long, Long>>()
         var inAt: Long? = null
         states.forEachIndexed { i, s ->
-            if (s.inPit && inAt == null) inAt = times[i]
-            if (!s.inPit) inAt?.let { stops += it to times[i]; inAt = null }
+            if (s.inPit && inAt == null) inAt = snapshotTimeline[i]
+            if (!s.inPit) inAt?.let { stops += it to snapshotTimeline[i]; inAt = null }
         }
         stops
     }
@@ -207,34 +221,34 @@ class DriverLaps(
 
     /** Every lap finished by [utcMs] that could have been run on track, as (start, end) UTC ms, oldest first. */
     fun lapWindows(utcMs: Long): List<Pair<Long, Long>> =
-        (1 until crossings.size)
-            .filter { crossings[it] <= utcMs }
-            .map { crossings[it - 1] to crossings[it] }
+        (1 until crossingTimeline.size)
+            .filter { crossingTimeline[it] <= utcMs }
+            .map { crossingTimeline[it - 1] to crossingTimeline[it] }
             .filter { (start, end) -> end - start in MIN_LAP_MS..MAX_LAP_MS }
 
     internal fun hasRankAt(utcMs: Long): Boolean =
-        states.getOrNull(times.floorIndex(utcMs))?.position != null
+        states.getOrNull(snapshotTimeline.floorIndex(utcMs))?.position != null
 
     /** Whether the driver was out of the race at [utcMs]. */
-    fun retiredAt(utcMs: Long): Boolean = times.floorIndex(utcMs).let { it >= 0 && states[it].retired }
+    fun retiredAt(utcMs: Long): Boolean = snapshotTimeline.floorIndex(utcMs).let { it >= 0 && states[it].retired }
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {
-        var i = times.floorIndex(utcMs)
+        var i = snapshotTimeline.floorIndex(utcMs)
         if (i < 0 || !states[i].inPit) return null
         while (i > 0 && states[i - 1].inPit) i--
-        return times[i]
+        return snapshotTimeline[i]
     }
 
     /** When the driver last crossed the line, by [utcMs]. */
-    fun lastCrossing(utcMs: Long): Long? = crossings.getOrNull(crossings.floorIndex(utcMs))
+    fun lastCrossing(utcMs: Long): Long? = crossingTimeline.getOrNull(crossingTimeline.floorIndex(utcMs))
 
     fun at(utcMs: Long, includeRunningTime: Boolean = true): CardState? {
-        return atSnapshot(times.floorIndex(utcMs), utcMs, includeRunningTime)
+        return atSnapshot(snapshotTimeline.floorIndex(utcMs), utcMs, includeRunningTime)
     }
 
     internal fun atSnapshot(i: Int, utcMs: Long, includeRunningTime: Boolean = false): CardState? {
-        if (i !in states.indices || i !in times.indices) return null
+        if (i !in states.indices || i !in snapshotTimeline.indices) return null
         val s = states[i]
         val lapStart = if (includeRunningTime && !s.inPit) lastCrossing(utcMs) else null
         return CardState(
@@ -841,8 +855,11 @@ object DriverTimingParser {
 class Tyre(val compound: String, val laps: Int)
 
 /** One driver's tyres through the session. */
-class TyreLog(internal val times: LongArray, private val tyres: List<Tyre>) {
-    fun at(utcMs: Long): Tyre? = atSnapshot(times.floorIndex(utcMs))
+class TyreLog internal constructor(internal val timeline: TimingTimestamps, private val tyres: List<Tyre>) {
+    constructor(times: LongArray, tyres: List<Tyre>) : this(TimingTimestamps.jvm(times, times.size), tyres)
+    internal val times: LongArray get() = timeline.legacyArray()
+    internal fun compact(pool: SpeedTimestampPool) = TyreLog(timeline.compact(pool), tyres)
+    fun at(utcMs: Long): Tyre? = atSnapshot(timeline.floorIndex(utcMs))
     internal fun atSnapshot(index: Int): Tyre? = tyres.getOrNull(index)
 }
 

@@ -53,7 +53,7 @@ internal class OverlayTowerSampler(
         val nativeIndices = nativeLookup?.sample(now, speedSource) == true
         scratchRows.clear()
         lapEntries.forEachIndexed { slot, (number, source) ->
-            val index = if (nativeIndices) nativeLookup!!.lapIndex(slot) else source.times.floorIndex(now)
+            val index = if (nativeIndices) nativeLookup!!.lapIndex(slot) else source.snapshotTimeline.floorIndex(now)
             if (index < 0) {
                 rowCache.remove(number)
                 return@forEachIndexed
@@ -149,15 +149,15 @@ internal class OverlayTowerSampler(
 private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<TyreLog>, private val weatherLog: WeatherLog) {
     private val lapCount = laps.size
     private val headerOffset = lapCount + tyres.size
-    private val baseTimes = (laps.map { it.times } + tyres.map { it.times } +
-        laps.map { it.lapTimes } + listOf(weatherLog.times)).toTypedArray()
-    private val baseCounts = IntArray(baseTimes.size) { baseTimes[it].size }
-    private val speedOffset = baseTimes.size
-    private var times: Array<LongArray?> = Array(baseTimes.size) { baseTimes[it] }
-    private var timeOwners: Array<TimingTimestamps?> = arrayOfNulls(baseTimes.size)
-    private var compactHandles = LongArray(baseTimes.size)
+    private val baseOwners = (laps.map { it.snapshotTimeline } + tyres.map { it.timeline } +
+        laps.map { it.lapTimeline } + listOf(weatherLog.timeline)).toTypedArray()
+    private val baseCounts = IntArray(baseOwners.size) { baseOwners[it].size }
+    private val speedOffset = baseOwners.size
+    private var times: Array<LongArray?> = Array(baseOwners.size) { baseOwners[it].array }
+    private var timeOwners: Array<TimingTimestamps?> = Array(baseOwners.size) { baseOwners[it] }
+    private var compactHandles = LongArray(baseOwners.size) { baseOwners[it].handle }
     private var counts = baseCounts
-    private var indices = IntArray(baseTimes.size) { -1 }
+    private var indices = IntArray(baseOwners.size) { -1 }
     private val positions = IntArray(lapCount)
     private val order = IntArray(lapCount)
     private var speedSource: Map<String, SpeedLog>? = null
@@ -184,14 +184,14 @@ private class NativeTowerLookup(private val laps: List<DriverLaps>, tyres: List<
             val total = speedOffset + speedEntries.size * 2
             val prior = indices
             timeOwners = Array(total) { index ->
-                if (index < speedOffset) null else {
+                if (index < speedOffset) baseOwners[index] else {
                     val slot = index - speedOffset
                     val log = speedEntries[slot / 2].value
                     if (slot % 2 == 0) log.speedTimeline else log.gearTimeline
                 }
             }
             times = Array(total) { index ->
-                if (index < speedOffset) baseTimes[index] else timeOwners[index]?.array
+                timeOwners[index]?.array
             }
             compactHandles = LongArray(total) { timeOwners[it]?.handle ?: 0L }
             counts = IntArray(total) { index ->

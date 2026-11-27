@@ -96,10 +96,12 @@ internal class NativePositionBatch(timing: SessionTiming) {
     private val tracks = timing.tracks.values
     private val states = timing.tracks.keys.map { timing.states[it] }
     private val laps = timing.tracks.keys.map { timing.laps[it] }
-    private val emptyTimes = LongArray(0)
-    private val metadataTimes = (states.map { it?.t ?: emptyTimes } +
-        laps.map { it?.times ?: emptyTimes }).toTypedArray()
-    private val metadataCounts = IntArray(metadataTimes.size) { metadataTimes[it].size }
+    private val emptyTimes = TimingTimestamps.jvm(LongArray(0), 0)
+    private val metadataOwners = (states.map { it?.timeline ?: emptyTimes } +
+        laps.map { it?.snapshotTimeline ?: emptyTimes }).toTypedArray()
+    private val metadataTimes = metadataOwners.map { it.array }.toTypedArray()
+    private val metadataHandles = LongArray(metadataOwners.size) { metadataOwners[it].handle }
+    private val metadataCounts = IntArray(metadataOwners.size) { metadataOwners[it].size }
     private val metadataIndices = IntArray(metadataTimes.size)
     fun state(index: Int): LapState =
         states[index]?.s?.getOrNull(metadataIndices[index]) ?: LapState.UNKNOWN
@@ -130,7 +132,10 @@ internal class NativePositionBatch(timing: SessionTiming) {
             java.lang.ref.Reference.reachabilityFence(timeOwners)
             java.lang.ref.Reference.reachabilityFence(pointOwners)
         }
-        if (!positionOk || includeMetadata && !NativeHotPath.floorIndices(metadataTimes, metadataCounts, now, metadataIndices)) {
+        val metadataOk = if (!includeMetadata) true else try {
+            NativeHotPath.floorIndicesWithCompactTimes(metadataTimes, metadataCounts, metadataHandles, now, metadataIndices)
+        } finally { java.lang.ref.Reference.reachabilityFence(metadataOwners) }
+        if (!positionOk || !metadataOk) {
             failed = true
             android.util.Log.i("PitwallNativeHotPath", "MAP_ENGINE requested=RUST actual=JVM reason=NATIVE_BATCH_UNAVAILABLE")
             return false

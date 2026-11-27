@@ -375,9 +375,12 @@ class DriverTrack internal constructor(
 }
 
 /** A driver's lap states as they changed through the session. */
-class StateLog(internal val t: LongArray, internal val s: Array<LapState>) {
-    fun at(utcMs: Long): LapState = s.getOrNull(t.floorIndex(utcMs)) ?: LapState.UNKNOWN
-    internal fun shiftedBy(offsetMs: Long) = StateLog(t.shiftedBy(offsetMs), s)
+class StateLog internal constructor(internal val timeline: TimingTimestamps, internal val s: Array<LapState>) {
+    constructor(t: LongArray, s: Array<LapState>) : this(TimingTimestamps.jvm(t, t.size), s)
+    internal val t: LongArray get() = timeline.legacyArray()
+    fun at(utcMs: Long): LapState = s.getOrNull(timeline.floorIndex(utcMs)) ?: LapState.UNKNOWN
+    internal fun shiftedBy(offsetMs: Long) = StateLog(timeline.shiftedBy(offsetMs), s)
+    internal fun compact(pool: SpeedTimestampPool) = StateLog(timeline.compact(pool), s)
 }
 
 /** A car's speed and gear through a session, from F1 CarData (speed in km/h). */
@@ -638,11 +641,14 @@ class WeatherReading(
     val raining: Boolean?,
 )
 
-class WeatherLog(internal val times: LongArray, private val readings: List<WeatherReading>) {
+class WeatherLog internal constructor(internal val timeline: TimingTimestamps, private val readings: List<WeatherReading>) {
+    constructor(times: LongArray, readings: List<WeatherReading>) : this(TimingTimestamps.jvm(times, times.size), readings)
+    internal val times: LongArray get() = timeline.legacyArray()
+    internal fun compact(pool: SpeedTimestampPool) = WeatherLog(timeline.compact(pool), readings)
     internal fun atSnapshot(index: Int): WeatherReading? = readings.getOrNull(index)
     fun at(utcMs: Long): WeatherReading? {
-        if (readings.isEmpty() || utcMs < times.first()) return null
-        val index = times.floorIndex(utcMs)
+        if (readings.isEmpty() || utcMs < timeline.first()) return null
+        val index = timeline.floorIndex(utcMs)
         return index.takeIf { it >= 0 }?.let(readings::get)
     }
 
@@ -1551,9 +1557,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
                 circuitTask.isCompleted -> circuitTask.await()?.outline ?: traced
                 else -> traced
             }
+            val sparsePool = SpeedTimestampPool(nativeRequested())
             ReplayCore(
-                path, type, drivers, built, history.states.states,
-                outline, line != null, streamStart, history.laps,
+                path, type, drivers, built, history.states.states.mapValues { it.value.compact(sparsePool) },
+                outline, line != null, streamStart, history.laps.mapValues { it.value.compact(sparsePool) },
                 if (clockShift == 0L) sessionParts else sessionParts.map { (time, part) -> time + clockShift to part },
             )
         }
@@ -1645,9 +1652,10 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
             if (outline.size >= 8) "Loading optional race details…"
             else "Timing tower data is loaded, but F1 has not provided a usable circuit outline for the map…"
         )
+        val supplementalTimingPool = SpeedTimestampPool(nativeRequested())
         val weather = weatherTask.await()?.let {
             runCatching { WeatherParser.parse(it, streamStart) }.getOrNull()
-        } ?: WeatherLog.NONE
+        }?.compact(supplementalTimingPool) ?: WeatherLog.NONE
         val started = statusTask.await()?.let {
             runCatching { parseSessionStarted(it, streamStart) }.getOrNull()
         }
@@ -1668,7 +1676,7 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
         )
         val tyres = tyresTask.await()?.let {
             runCatching { TyreParser.parse(it, streamStart) }.getOrNull()
-        }.orEmpty()
+        }.orEmpty().mapValues { it.value.compact(supplementalTimingPool) }
         val radio = radioTask.await()?.let {
             runCatching { parseRadio(it) }.getOrDefault(emptyList())
         }.orEmpty()

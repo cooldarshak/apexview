@@ -15,6 +15,25 @@ internal class TimingTimestamps private constructor(
         require(index in 0 until count)
         return native?.at(index) ?: requireNotNull(array)[index]
     }
+    val size: Int get() = count
+    val indices: IntRange get() = 0 until count
+    fun first(): Long = this[0]
+    fun getOrNull(index: Int): Long? = if (index in indices) this[index] else null
+    fun floorIndex(utcMs: Long): Int {
+        var low = 0; var high = count
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (this[mid] <= utcMs) low = mid + 1 else high = mid
+        }
+        return low - 1
+    }
+    fun copyOfRange(first: Int, end: Int): LongArray {
+        require(first in 0..end && end <= count)
+        return LongArray(end - first) { this[first + it] }
+    }
+    fun shiftedBy(offsetMs: Long): LongArray = LongArray(count) { this[it] + offsetMs }
+    fun compact(pool: SpeedTimestampPool): TimingTimestamps =
+        if (native != null) this else pool.freezeTimeline(requireNotNull(array), count)
     // Existing diagnostic/test access only. Production cache and sampler
     // consumers read indexed values or pass the compact native handle.
     fun legacyArray(): LongArray = array ?: LongArray(count) { this[it] }
