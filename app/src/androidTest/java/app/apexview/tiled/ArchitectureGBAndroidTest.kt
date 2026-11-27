@@ -19,6 +19,34 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun rustReplayPositionDecoderMatchesReferenceCoordinatesAndUtc() {
+        val json = """{"Position":[{"Timestamp":"2026-10-24T20:00:00.1234567Z","Entries":{"44":{"Status":"OnTrack","X":100,"Y":-12,"Z":0},"1":{"Status":"OffTrack","X":5,"Y":6,"Z":0}}},{"Entries":{"4":{"X":16777217,"Y":-2147483648}},"Timestamp":"2026-10-24T20:00:00.3456789Z"}]}"""
+        val out = LongArray(NativeHotPath.REPLAY_POSITION_WORDS)
+        assertTrue(NativeHotPath.replayPositions(json, out))
+        assertEquals(2L, out[0]); assertEquals(2L, out[1])
+        val samples = org.json.JSONObject(json).getJSONArray("Position")
+        var row = 0
+        for (i in 0 until samples.length()) {
+            val sample = samples.getJSONObject(i)
+            val utc = java.time.Instant.parse(sample.getString("Timestamp")).toEpochMilli()
+            val entries = sample.getJSONObject("Entries")
+            entries.keys().forEach { number ->
+                val entry = entries.getJSONObject(number)
+                if (entry.optString("Status") != "OffTrack") {
+                    val at = 3 + row++ * 4
+                    assertEquals(utc, out[at]); assertEquals(number.toLong(), out[at+1])
+                    assertEquals(entry.optDouble("X").toFloat().toRawBits(),out[at+2].toInt())
+                    assertEquals(entry.optDouble("Y").toFloat().toRawBits(),out[at+3].toInt())
+                }
+            }
+        }
+        assertEquals(java.time.Instant.parse(samples.getJSONObject(1).getString("Timestamp")).toEpochMilli(),out[2])
+        val old = out.copyOf()
+        assertFalse(NativeHotPath.replayPositions(json.replace("16777217","1.25"),out))
+        assertArrayEquals(old,out)
+    }
+
+    @Test
     fun productionMedia3LoadControlAndSourceWrapperCanStartStopAndRestart() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

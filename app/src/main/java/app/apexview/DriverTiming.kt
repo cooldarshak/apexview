@@ -164,7 +164,12 @@ class DriverLaps internal constructor(
         val end = range.last + 1
         val crossingRange = historyWindowRange(crossingTimeline.size, from, until) { crossingTimeline[it] }
         val lapRange = historyWindowRange(lapTimeline.size, from, until) { lapTimeline[it] }
-        return DriverLaps(snapshotTimeline.copyOfRange(first, end), states.subList(first, end).toList(),
+        val selected = when (states) {
+            is RollingDriverSnapshots.Frozen -> states.window(first, end)
+            is RollingDriverSnapshots.Window -> states.window(first, end)
+            else -> states.subList(first, end).toList()
+        }
+        return DriverLaps(snapshotTimeline.copyOfRange(first, end), selected,
             crossingRange?.let { crossingTimeline.copyOfRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
             lapRange?.let { lapTimeline.copyOfRange(it.first, it.last + 1) } ?: LongArray(0),
             lapRange?.let { lapCounts.copyOfRange(it.first, it.last + 1) } ?: IntArray(0),
@@ -233,7 +238,8 @@ class DriverLaps internal constructor(
     fun retiredAt(utcMs: Long): Boolean = retiredAtSnapshot(snapshotTimeline.floorIndex(utcMs))
     internal fun retiredAtSnapshot(index: Int): Boolean =
         index in states.indices && ((states as? CompactDriverSnapshots)?.retiredAt(index)
-            ?: (states as? RollingDriverSnapshots.Frozen)?.retiredAt(index) ?: states[index].retired)
+            ?: (states as? RollingDriverSnapshots.Frozen)?.retiredAt(index)
+            ?: (states as? RollingDriverSnapshots.Window)?.retiredAt(index) ?: states[index].retired)
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {
@@ -437,7 +443,7 @@ object DriverTimingParser {
             val end = range.last + 1
             val crossings = driver.crossings.window(from, until)
             val laps = driver.lapTimes.window(from, until)
-            number to DriverLaps(driver.times.copyRange(first, end), driver.snaps.subList(first, end).toList(),
+            number to DriverLaps(driver.times.copyRange(first, end), driver.snaps.window(first, end),
                 crossings?.let { driver.crossings.copyRange((it.first - 8).coerceAtLeast(0), it.last + 1) } ?: LongArray(0),
                 laps?.let { driver.lapTimes.copyRange(it.first, it.last + 1) } ?: LongArray(0),
                 laps?.let { driver.lapCounts.subList(it.first, it.last + 1).toIntArray() } ?: IntArray(0),
