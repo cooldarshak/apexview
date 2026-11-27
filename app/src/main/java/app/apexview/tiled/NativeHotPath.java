@@ -207,6 +207,47 @@ public final class NativeHotPath {
     }
     private static native ByteBuffer nativeCreateCompactTelemetry(short[] source,int count,int bits,long[] token);
 
+    /** Immutable Rust-owned indexed deltas. No mutable Java view or raw
+     * native address is exposed. The shared reaper retires the handle only
+     * after the last Java history reader becomes unreachable. */
+    public static final class CompactSnapshotDeltas {
+        private final long handle;
+        private final int rows;
+        private CompactSnapshotDeltas(long handle, int rows) {
+            this.handle = handle;
+            this.rows = rows;
+        }
+        public void read(int index, int[] output) {
+            if (index < 0 || index >= rows || output.length != 9) throw new IndexOutOfBoundsException();
+            try {
+                if (nativeReadCompactSnapshotDelta(handle, index, output) != 1)
+                    throw new IllegalStateException("Native snapshot delta unavailable");
+            } finally { Reference.reachabilityFence(this); }
+        }
+    }
+    public static CompactSnapshotDeltas compactSnapshotDeltas(short[] source, int rows) {
+        if (rows < 64 || source.length != (long)rows * 9L || !available()) return null;
+        long handle = 0;
+        boolean registered = false;
+        try {
+            handle = nativeCreateCompactSnapshotDeltas(source, rows);
+            if (handle <= 0) return null;
+            CompactSnapshotDeltas owner = new CompactSnapshotDeltas(handle, rows);
+            ensureCompactReaper();
+            compactRefs.add(new CompactRef(owner, handle));
+            registered = true;
+            return owner;
+        } catch (LinkageError | RuntimeException unavailable) { return null; }
+        finally {
+            if (!registered && handle > 0) {
+                try { nativeReleaseCompactTimes(handle); }
+                catch (LinkageError | RuntimeException ignored) { }
+            }
+        }
+    }
+    private static native long nativeCreateCompactSnapshotDeltas(short[] source, int rows);
+    private static native int nativeReadCompactSnapshotDelta(long handle, int index, int[] output);
+
     public static long[] compactTimingSnapshot() {
         if (!available()) return null;
         long[] out = new long[9];
