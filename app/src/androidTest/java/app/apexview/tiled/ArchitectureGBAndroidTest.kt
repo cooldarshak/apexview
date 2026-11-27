@@ -1044,8 +1044,38 @@ class ArchitectureGBAndroidTest {
             assertEquals(NativeStitchingSelection.Route.JVM, bridge.decision.actual)
             val next = bridge.compose(request, expectedInit, true, 5_000, ::reference)
             assertTrue(next.nativeEpoch != null)
+            assertNotEquals("Seek must advance publication epoch even with an exact certificate",
+                second.nativeEpoch, next.nativeEpoch)
             bridge.publish(next.nativeEpoch) { verify(next) }
-            assertEquals(2, references)
+            assertEquals("Exact, previously byte-verified request reuses its certificate after seek", 1, references)
+            assertEquals(NativeStitchingSelection.Route.RUST, bridge.decision.actual)
+
+            // Same init, geometry, quality and source bytes, but a different
+            // sequence number must not reuse the earlier certificate.
+            bridge.invalidateForSeek()
+            val changedRequest = request.copy(firstOutputSequenceNumber =
+                Math.addExact(request.firstOutputSequenceNumber, 1L))
+            assertNotEquals(ClearCompositionCertificates.key(request),
+                ClearCompositionCertificates.key(changedRequest))
+            var changedReferenceDigest: String? = null
+            val changed = bridge.compose(changedRequest, expectedInit, true, 5_000) {
+                references++
+                HevcClearCmafGridComposer.compose(changedRequest).also {
+                    changedReferenceDigest = ClearCompositionCertificates.digest(it.mediaFragments.single())
+                }
+            }
+            assertEquals("Uncertified request requires a new independent reference after seek", 2, references)
+            assertTrue(changed.nativeEpoch != null)
+            assertNotEquals(next.nativeEpoch, changed.nativeEpoch)
+            bridge.publish(changed.nativeEpoch) {
+                assertArrayEquals(expectedInit, changed.output.initializationSegment)
+                val digest = ClearCompositionCertificates.digest(changed.output.mediaFragments.single())
+                assertEquals(requireNotNull(changedReferenceDigest), digest)
+                assertNotEquals("Changed output sequence must not reuse old media",
+                    ClearCompositionCertificates.digest(expectedMedia), digest)
+                changed.output.initializationSegment.fill(0)
+                changed.output.mediaFragments.single().fill(0)
+            }
             assertEquals(NativeStitchingSelection.Route.RUST, bridge.decision.actual)
             // A later invalid native command must not hide an error in the
             // reference path or silently leave the engine marked active.
