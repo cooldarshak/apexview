@@ -36,6 +36,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     ).apply { start() }
     private val gl = Handler(thread.looper)
     private var decoderIngress: SceneDecoderIngress? = null
+    private var asyncInput: SceneAsyncTextureLatch? = null
+    private var lastAsyncSubmitted = 0L
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
     private var ingressMaxWaitNs = 0L
@@ -238,9 +240,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val hasNewVideo = frameDemand.beginFrame()
             val measurement = draw()
             if (measurement != null) {
-                if (hasNewVideo) cadenceGate.onVideoDraw(frameTimeNanos)
+                val submittedNewVideo = measurement.newAsyncVideo ?: hasNewVideo
+                if (submittedNewVideo) cadenceGate.onVideoDraw(frameTimeNanos)
                 pacing.onDisplayFrame(frameTimeNanos, measurement.swapNs,
-                    hasNewVideo, measurement.drawNs, callbackStartNs)
+                    submittedNewVideo, measurement.drawNs, callbackStartNs)
             } else {
                 frameDemand.onDrawUnavailable(hasNewVideo)
                 pacing.onDrawUnavailable()
@@ -309,6 +312,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
                 cadenceGate.reset()
                 // New encoded atlas or crop mapping cannot reuse old input pixels.
                 hasFrame = false
+                asyncInput?.discard()
+                lastAsyncSubmitted = 0L
                 frameDemand.discardPendingVideo()
                 firstFrameReported = false
             }
@@ -454,13 +459,30 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-        val frames = SurfaceTexture(texture)
+        val independent = SceneAsyncTextureLatch.tryCreate(display, selected, contextGl, texture, protectedOutput, gl)
+        asyncInput = independent
+        val frames = independent?.frames ?: SurfaceTexture(texture)
         decoderTexture = frames
         scene?.let {
             frames.setDefaultBufferSize(it.atlasWidth, it.atlasHeight)
             graphicsAtlasWidth = it.atlasWidth
             graphicsAtlasHeight = it.atlasHeight
         }
+        if (independent != null) {
+            independent.start(report = { event ->
+                if (!released && surfaceLifetime.matches(lifetime)) {
+                    pacing.onTextureLatched(event.latchedNs, event.latchedNs - event.startedNs,
+                        event.timestampNs, callbackArrivalNs = event.lastNs)
+                    codecCorrelation?.onTextureLatched(input, event.timestampNs, event.latchedNs)
+                }
+            }, signal = { guarded(lifetime) {
+                if (asyncInput === independent && decoderTexture === frames) {
+                    drainAsyncStats()
+                    hasFrame = true
+                    scheduleVideoFrame(newVideo = true)
+                }
+            } }, failure = { error -> guarded(lifetime) { throw error } })
+        } else {
         val ingress = SceneDecoderIngress(gl) { count, firstNs, lastNs ->
             guarded(lifetime) {
                 if (decoderTexture === frames && !released) {
@@ -499,6 +521,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         decoderIngress = ingress
         frames.setOnFrameAvailableListener({ ingress.offer() }, ingress.handler)
+        }
         val surface = Surface(frames); input = surface
         // Never relabel an input created for an obsolete Android surface
         // with the newer UI epoch, even if EGL initialization was slow.
@@ -532,7 +555,16 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
     }
 
-    private data class SurfaceFrameTiming(val drawNs: Long, val swapNs: Long)
+    private fun drainAsyncStats() {
+        val stats = asyncInput?.takeStats() ?: return
+        ingressNotifications += stats.notifications
+        ingressCoalesced += stats.coalesced
+        ingressMaxWaitNs = maxOf(ingressMaxWaitNs, stats.maxWaitNs)
+        rendered += stats.latches
+        intervalSourceTimestampRegressions += stats.regressions
+    }
+
+    private data class SurfaceFrameTiming(val drawNs: Long, val swapNs: Long, val newAsyncVideo: Boolean?)
 
     private fun draw(): SurfaceFrameTiming? {
         val surfaceEpoch = renderEpoch
@@ -542,30 +574,26 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val drawStartNs = System.nanoTime()
         GLES20.glViewport(0, 0, outputWidth, outputHeight)
         GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        if (hasFrame) {
-            GLES20.glUseProgram(program)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-            GLES20.glUniform1i(imageUniform, 0)
-            GLES20.glUniformMatrix4fv(textureMatrixUniform, 1, false, transform, 0)
-            val p = positionAttribute; val uv = texcoordAttribute
-            GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
-            if (cachedModel != model) {
-                cachedQuads = quadBuffers.update(model)
-                cachedModel = model
-            }
-            for ((positions, coordinates) in cachedQuads) {
-                GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 0, positions)
-                GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, coordinates)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            }
+        val independent = asyncInput
+        val sampledAt = if (!hasFrame) 0L else if (independent != null) {
+            independent.sample(transform) { drawVideoGl(model) }
+        } else {
+            drawVideoGl(model)
+            0L
         }
         val swapStartedNs = System.nanoTime()
         Trace.beginSection("PitwallSurfaceSceneSwap")
         try { check(EGL14.eglSwapBuffers(display, window)) { "Scene output swap failed" } }
         finally { Trace.endSection() }
         val swapEndedNs = System.nanoTime()
-        if (hasFrame) codecCorrelation?.onSwapSubmitted(input, swapEndedNs)
-        if (hasFrame) {
+        val submittedVideo = hasFrame && (independent == null || sampledAt > 0L)
+        val newAsyncVideo = if (independent != null) submittedVideo && sampledAt > lastAsyncSubmitted else null
+        if (newAsyncVideo == true) lastAsyncSubmitted = sampledAt
+        if (submittedVideo) {
+            if (independent != null) codecCorrelation?.onSampledSwapSubmitted(input, swapEndedNs, sampledAt)
+            else codecCorrelation?.onSwapSubmitted(input, swapEndedNs)
+        }
+        if (submittedVideo) {
             val swapMs = (swapEndedNs - swapStartedNs) / 1_000_000L
             intervalLongestSwapMs = maxOf(intervalLongestSwapMs, swapMs)
             if (swapMs > 18L) intervalSwapsOver18ms++
@@ -577,7 +605,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             lastPresentedAtNs = swapEndedNs
             intervalPresented++
         }
-        if (hasFrame && !firstFrameReported) {
+        if (submittedVideo && !firstFrameReported) {
             firstFrameReported = true
             post {
                 if (!released && outputReadiness.acknowledgeSubmittedFrame(surfaceEpoch)) {
@@ -590,6 +618,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         }
         val now = System.nanoTime()
         if (now - lastLogNs >= 5_000_000_000L) {
+            drainAsyncStats()
             val metrics = pacing.snapshotAndReset()
             Log.i("ApexviewSingleDecoder", "SCENE_DECODER_INGRESS notifications=$ingressNotifications coalesced=$ingressCoalesced maxGlWaitMs=${ingressMaxWaitNs / 1_000_000L}")
             ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
@@ -667,13 +696,31 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             intervalSourceTimestampRegressions = 0
         }
         return SurfaceFrameTiming(swapStartedNs - drawStartNs,
-            swapEndedNs - swapStartedNs)
+            swapEndedNs - swapStartedNs, newAsyncVideo)
+    }
+
+    private fun drawVideoGl(model: VideoScene) {
+        GLES20.glUseProgram(program)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
+        GLES20.glUniform1i(imageUniform, 0)
+        GLES20.glUniformMatrix4fv(textureMatrixUniform, 1, false, transform, 0)
+        val p = positionAttribute; val uv = texcoordAttribute
+        GLES20.glEnableVertexAttribArray(p); GLES20.glEnableVertexAttribArray(uv)
+        if (cachedModel != model) {
+            cachedQuads = quadBuffers.update(model)
+            cachedModel = model
+        }
+        for ((positions, coordinates) in cachedQuads) {
+            GLES20.glVertexAttribPointer(p, 2, GLES20.GL_FLOAT, false, 0, positions)
+            GLES20.glVertexAttribPointer(uv, 2, GLES20.GL_FLOAT, false, 0, coordinates)
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+        }
     }
 
     private fun recordGraphicsOwner() {
         SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
             if (protectedOutput) "SecureSurfaceView" else "SurfaceView", graphicsLifetime, renderEpoch,
-            if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
+            (if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0) + (if (asyncInput != null) 1 else 0),
             if (window != EGL14.EGL_NO_SURFACE) 1 else 0,
             if (decoderTexture != null) 1 else 0,
             graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0)))
@@ -708,11 +755,14 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         displayClock = null
         frameDemand.reset()
         cadenceGate.reset()
-        pacing.reset()
         lastLogNs = 0L
         nextGlProbeExpectedNs = 0L
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
+        val independent = asyncInput.also { asyncInput = null }
+        steps.run("decoder-async-latch") { independent?.close() }
+        lastAsyncSubmitted = 0L
+        pacing.reset()
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0
         input?.let { Log.i("ApexviewSingleDecoder", "SCENE_CODEC_INPUT_RELEASE " +
             "renderer=SurfaceView protected=$protectedOutput " +
@@ -723,7 +773,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val oldTexture = decoderTexture
         input = null; decoderTexture = null; hasFrame = false
         steps.run("decoder-surface") { oldInput?.release() }
-        steps.run("decoder-texture") { oldTexture?.release() }
+        steps.run("decoder-texture") { if (independent == null) oldTexture?.release() }
         firstFrameReported = false
         renderEpoch = -1L
         lastPresentedAtNs = 0L
