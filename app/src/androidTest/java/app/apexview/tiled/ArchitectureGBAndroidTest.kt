@@ -19,6 +19,76 @@ import org.junit.runner.RunWith
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class ArchitectureGBAndroidTest {
     @Test
+    fun productionMedia3LoadControlAndSourceWrapperCanStartStopAndRestart() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val sampleRate = 44100
+        val payloadBytes = sampleRate * 2
+        val wav = ByteBuffer.allocate(44 + payloadBytes).order(ByteOrder.LITTLE_ENDIAN)
+        wav.put("RIFF".toByteArray(Charsets.US_ASCII)).putInt(36 + payloadBytes)
+        wav.put("WAVEfmt ".toByteArray(Charsets.US_ASCII)).putInt(16)
+        wav.putShort(1.toShort()).putShort(1.toShort()).putInt(sampleRate)
+        wav.putInt(sampleRate * 2).putShort(2.toShort()).putShort(16.toShort())
+        wav.put("data".toByteArray(Charsets.US_ASCII)).putInt(payloadBytes)
+        val file = java.io.File.createTempFile("pitwall-load-control", ".wav", context.cacheDir)
+        file.writeBytes(wav.array())
+        val ledger = app.apexview.Media3SourceAllocationLedger()
+        val allocator = androidx.media3.exoplayer.upstream.DefaultAllocator(true,
+            androidx.media3.common.C.DEFAULT_BUFFER_SEGMENT_SIZE)
+        val policy = app.apexview.ArchiveForwardBufferPolicy()
+        val original = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setAllocator(allocator)
+            .setBufferDurationsMs(androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1000, 2000)
+            .build()
+        val control = app.apexview.ArchiveMeasuredLoadControl(original, policy)
+        val factory = ledger.factory(
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context),
+            app.apexview.Media3SourceAllocationLedger.Kind.SOURCE_MIXED)
+        var player: androidx.media3.exoplayer.ExoPlayer? = null
+        try {
+            // ExoPlayer invokes back-buffer methods before build() returns.
+            instrumentation.runOnMainSync {
+                player = androidx.media3.exoplayer.ExoPlayer.Builder(context)
+                    .setMediaSourceFactory(factory).setLoadControl(control).build()
+                player!!.volume = 0f
+            }
+            repeat(2) {
+                val finished = java.util.concurrent.CountDownLatch(1)
+                val error = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+                val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+                val listener = object : androidx.media3.common.Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == androidx.media3.common.Player.STATE_READY) ready.set(true)
+                        if (state == androidx.media3.common.Player.STATE_ENDED) finished.countDown()
+                    }
+                    override fun onPlayerError(failure: androidx.media3.common.PlaybackException) {
+                        error.set(failure); finished.countDown()
+                    }
+                }
+                instrumentation.runOnMainSync {
+                    val p = checkNotNull(player)
+                    p.addListener(listener)
+                    p.setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+                    p.prepare()
+                    p.play()
+                }
+                assertTrue("Production wrapper never completed playback", finished.await(30, java.util.concurrent.TimeUnit.SECONDS))
+                error.get()?.let { throw AssertionError("Production wrapper playback error", it) }
+                assertTrue("Production wrapper never reached READY", ready.get())
+                instrumentation.runOnMainSync {
+                    player!!.removeListener(listener)
+                    player!!.stop()
+                    player!!.clearMediaItems()
+                }
+            }
+        } finally {
+            instrumentation.runOnMainSync { player?.release() }
+            file.delete()
+        }
+    }
+
+    @Test
     fun compactArchiveTimestampsRetainExactMapAndTowerSeekSemantics() {
         assertTrue(NativeHotPath.available())
         val base = 1_800_000_000_123L

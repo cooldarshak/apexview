@@ -7673,6 +7673,15 @@ class AppState(
                 throw cancelled
             } catch (e: Exception) {
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                if (playbackOffer) {
+                    // No URLs, entitlement, or raw exception messages: the type and
+                    // code locations identify a synchronous startup failure safely.
+                    val locations = e.stackTrace.take(12).joinToString("|") {
+                        "${it.className}.${it.methodName}:${it.lineNumber}"
+                    }
+                    android.util.Log.e("PitwallPlayback",
+                        "event=startup-exception type=${e.javaClass.name} stack=$locations")
+                }
                 if (taskMessageOwner === owner) message = "$what failed: ${e.message}"
             } finally {
                 if (taskMessageOwner === owner) taskMessageOwner = null
