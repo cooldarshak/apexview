@@ -1293,3 +1293,20 @@ pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayIndexCl
         if let Ok(mut registry)=replay_indices().lock(){registry.1.remove(&handle);}
     }));
 }
+
+
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeHotPath_nativeReplayTowerSimple(
+    mut env:JNIEnv<'_>,_class:JClass<'_>,source:jni::objects::JString<'_>,out:JLongArray<'_>,
+)->jint {
+    let result=catch_unwind(AssertUnwindSafe(||->Option<()>{
+        if env.get_array_length(&out).ok()? as usize != crate::replay_positions::TOWER_WORDS{return None;}
+        let mut scratch=[0i64;crate::replay_positions::TOWER_WORDS];
+        let text=env.get_string(&source).ok()?;
+        let used=crate::replay_positions::tower_simple(text.to_bytes(),&mut scratch)?;
+        drop(text);
+        env.set_long_array_region(&out,0,&scratch[..used]).ok()?;
+        Some(())
+    }));
+    if matches!(result,Ok(Some(()))){1}else{0}
+}
