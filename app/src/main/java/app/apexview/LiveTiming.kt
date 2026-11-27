@@ -742,32 +742,32 @@ internal class StateHistoryAccumulator(private val nativeRequested: Boolean = fa
     }
 
     internal fun acceptDriver(number: String, driver: JSONObject, time: Long) {
-            if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return
-            var state = current[number] ?: LapState.UNKNOWN
-            if (driver.optBoolean("InPit")) state = LapState.PIT
-            if (driver.optBoolean("PitOut") || (driver.has("InPit") && !driver.optBoolean("InPit") && state == LapState.PIT)) {
-                state = LapState.OUT_LAP
-            }
-            if (driver.has("NumberOfLaps")) {
-                val count = driver.optInt("NumberOfLaps", -1)
-                val previous = laps[number]
-                if (count >= (previous ?: 0)) laps[number] = count
-                if (previous != null && count > previous) {
-                    crossings += number to time
-                    state = when (state) {
-                        LapState.OUT_LAP, LapState.COOL_DOWN -> LapState.PUSH
-                        LapState.PUSH -> LapState.COOL_DOWN
-                        else -> state
-                    }
+        if (!driver.has("InPit") && !driver.has("PitOut") && !driver.has("NumberOfLaps") && !driver.has("KnockedOut")) return
+        var state = current[number] ?: LapState.UNKNOWN
+        if (driver.optBoolean("InPit")) state = LapState.PIT
+        if (driver.optBoolean("PitOut") || (driver.has("InPit") && !driver.optBoolean("InPit") && state == LapState.PIT)) {
+            state = LapState.OUT_LAP
+        }
+        if (driver.has("NumberOfLaps")) {
+            val count = driver.optInt("NumberOfLaps", -1)
+            val previous = laps[number]
+            if (count >= (previous ?: 0)) laps[number] = count
+            if (previous != null && count > previous) {
+                crossings += number to time
+                state = when (state) {
+                    LapState.OUT_LAP, LapState.COOL_DOWN -> LapState.PUSH
+                    LapState.PUSH -> LapState.COOL_DOWN
+                    else -> state
                 }
             }
-            if (driver.optBoolean("KnockedOut")) state = LapState.KNOCKED_OUT
-            if (state != current[number]) {
-                current[number] = state
-                val timeline = times.getOrPut(number) { RollingTimingIndex(nativeRequested) }
-                timeline += time
-                values.getOrPut(number) { mutableListOf() }.add(state)
-            }
+        }
+        if (driver.optBoolean("KnockedOut")) state = LapState.KNOCKED_OUT
+        if (state != current[number]) {
+            current[number] = state
+            val timeline = times.getOrPut(number) { RollingTimingIndex(nativeRequested) }
+            timeline += time
+            values.getOrPut(number) { mutableListOf() }.add(state)
+        }
     }
 
     fun finish(): StateParse {

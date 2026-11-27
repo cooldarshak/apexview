@@ -52,8 +52,17 @@ class ArchitectureGBAndroidTest {
             00:00:01.000{"Lines":{"44":{"GapToLeader":{"Value":"+1.8"}}}}
             00:00:02.000{"Lines":{"44":{"Retired":false,"Sectors":{"0":{"Value":"20.0"}}}}}
         """.trimIndent()
-        val a = app.apexview.DriverTimingParser.parse(primary, 0L, supplement, false)
-        val b = app.apexview.DriverTimingParser.parse(primary, 0L, supplement, true)
+        val referenceStates = app.apexview.StateHistoryAccumulator(false)
+        val nativeStates = app.apexview.StateHistoryAccumulator(true)
+        val a = app.apexview.DriverTimingParser.parseWithEngine(primary, 0L, supplement, referenceStates, false)
+        val b = app.apexview.DriverTimingParser.parseWithEngine(primary, 0L, supplement, nativeStates, true)
+        val expectedState = referenceStates.finish()
+        val actualState = nativeStates.finish()
+        assertEquals(expectedState.crossings, actualState.crossings)
+        assertEquals(expectedState.states.keys, actualState.states.keys)
+        for (number in expectedState.states.keys) for (time in 0L..4000L step 100L) {
+            assertEquals(expectedState.states.getValue(number).at(time), actualState.states.getValue(number).at(time))
+        }
         assertEquals(a.keys, b.keys)
         for (number in a.keys) {
             val x = a.getValue(number)

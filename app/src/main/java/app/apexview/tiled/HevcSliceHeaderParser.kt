@@ -9,6 +9,11 @@ package app.apexview.tiled
  * extensions and unsupported merge profiles remain fail-closed in the compatibility gate.
  */
 internal object HevcSliceHeaderParser {
+    private const val SCRATCH_BYTES = 8192
+    // The independent JVM validator must not share the Rust writer's proof.
+    // One bounded, wiped scratch array per parsing thread avoids allocating
+    // up to 8 KiB for every source slice while retaining the full scan.
+    private val rbspScratch = ThreadLocal.withInitial { ByteArray(SCRATCH_BYTES) }
     data class ReferencePicture(
         val deltaPoc: Int?,
         val pocLsb: Int?,
@@ -139,7 +144,15 @@ internal object HevcSliceHeaderParser {
             "PPS init_qp_minus26 exceeds the range for the SPS luma bit depth"
         }
 
-        val bits = HevcBitReader(HevcBitstream.ebspToRbsp(nal, offset + 2, parsePrefixBytes - 2))
+        val payloadBytes = parsePrefixBytes - 2
+        val scratch = if (payloadBytes <= SCRATCH_BYTES) rbspScratch.get() else null
+        try {
+        val bits = if (scratch == null) {
+            HevcBitReader(HevcBitstream.ebspToRbsp(nal, offset + 2, payloadBytes))
+        } else {
+            val written = HevcBitstream.ebspToRbspInto(nal, offset + 2, payloadBytes, scratch)
+            HevcBitReader(scratch, written)
+        }
         val initialBits = bits.bitsRemaining
         fun consumed() = initialBits - bits.bitsRemaining
 
@@ -428,6 +441,11 @@ internal object HevcSliceHeaderParser {
             entryPointFieldEndBit = entryPointFieldEndBit,
             alignmentStartBit = alignmentStartBit
         )
+        } finally {
+            // The clear prefix is borrowed only for this synchronous proof.
+            // Never retain source bytes in a long-lived worker scratch.
+            scratch?.fill(0, 0, payloadBytes)
+        }
     }
 
     private fun parsePredictionWeightTable(

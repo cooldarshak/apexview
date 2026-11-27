@@ -118,6 +118,16 @@ internal object HevcBitstream {
             "HEVC EBSP range is out of bounds"
         }
         val out = ByteArray(length)
+        val written = ebspToRbspInto(ebsp, offset, length, out)
+        return if (written == length) out else out.copyOf(written)
+    }
+
+    /** Same complete range validation, with private caller-owned scratch. */
+    internal fun ebspToRbspInto(ebsp: ByteArray, offset: Int, length: Int, out: ByteArray): Int {
+        require(offset >= 0 && length >= 0 && offset <= ebsp.size && length <= ebsp.size - offset) {
+            "HEVC EBSP range is out of bounds"
+        }
+        require(out !== ebsp && out.size >= length) { "HEVC RBSP scratch is invalid" }
         var written = 0
         var zeroCount = 0
         var i = offset
@@ -136,15 +146,16 @@ internal object HevcBitstream {
             zeroCount = if (value == 0) zeroCount + 1 else 0
             i++
         }
-        return if (written == length) out else out.copyOf(written)
+        return written
     }
 }
 
 /** Small MSB-first bit reader used by subsequent SPS/PPS/slice-header parsing. */
-internal class HevcBitReader(private val data: ByteArray) {
+internal class HevcBitReader(private val data: ByteArray, private val length: Int = data.size) {
+    init { require(length in 0..data.size && length <= Int.MAX_VALUE / 8) }
     private var bitOffset = 0
 
-    val bitsRemaining: Int get() = data.size * 8 - bitOffset
+    val bitsRemaining: Int get() = length * 8 - bitOffset
     val positionBits: Int get() = bitOffset
 
     fun readBit(): Int = readBits(1)

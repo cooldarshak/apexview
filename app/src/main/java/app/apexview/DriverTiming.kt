@@ -406,6 +406,7 @@ object DriverTimingParser {
         private val scratch = if (nativeRequested)
             LongArray(app.apexview.tiled.NativeHotPath.REPLAY_TOWER_WORDS) else null
         private val keys = if (scratch != null) arrayOfNulls<String>(1000) else null
+        private val complexRows = if (scratch != null) arrayOfNulls<JSONObject>(128) else null
         var accepted = 0
             private set
         fun apply(json: String, time: Long, drivers: MutableMap<String, Live>,
@@ -414,26 +415,42 @@ object DriverTimingParser {
             val out = scratch ?: return false
             if (!app.apexview.tiled.NativeHotPath.replayTowerSimple(json, out)) return false
             val numbers = requireNotNull(keys)
+            val rows = requireNotNull(complexRows)
+            val count = out[0].toInt()
+            if (count !in 0..rows.size) return false
             fun text(span: Long): String? =
                 json.substring((span ushr 32).toInt(), span.toInt()).ifEmpty { null }
-            for (i in 0 until out[0].toInt()) {
-                val at = 1 + 6 * i
-                val number = out[at].toInt()
-                val key = numbers[number] ?: number.toString().also { numbers[number] = it }
-                val live = drivers.getOrPut(key) { Live(true) }
-                val complex = out[at + 5]
-                if (complex != -1L) {
-                    val row = JSONObject(json.substring((complex ushr 32).toInt(), complex.toInt()))
-                    if (source == 0) stateHistory?.acceptDriver(key, row, time)
-                    DriverTimingParser.apply(live, row, time, statusPolicy, source)
-                    live.snap(time)
-                    continue
+            try {
+                // Do not commit even one simple row until Android's reference
+                // parser also accepts every complex row. A lexical Rust JSON
+                // success alone cannot prove org.json's numeric semantics.
+                for (i in 0 until count) {
+                    val span = out[1 + 6 * i + 5]
+                    if (span != -1L) rows[i] = runCatching {
+                        JSONObject(json.substring((span ushr 32).toInt(), span.toInt()))
+                    }.getOrNull() ?: return false
                 }
-                if (out[at + 1] != Long.MIN_VALUE) live.position = out[at + 1].toInt()
-                if (out[at + 2] != -1L) live.gap = text(out[at + 2])
-                if (out[at + 3] != -1L) live.toLeader = text(out[at + 3])
-                if (out[at + 4] != -1L) live.ahead = text(out[at + 4])
-                live.snap(time)
+                for (i in 0 until count) {
+                    val at = 1 + 6 * i
+                    val number = out[at].toInt()
+                    val key = numbers[number] ?: number.toString().also { numbers[number] = it }
+                    val live = drivers.getOrPut(key) { Live(true) }
+                    val row = rows[i]
+                    if (row != null) {
+                        if (source == 0) stateHistory?.acceptDriver(key, row, time)
+                        DriverTimingParser.apply(live, row, time, statusPolicy, source)
+                    } else {
+                        if (out[at + 1] != Long.MIN_VALUE) live.position = out[at + 1].toInt()
+                        if (out[at + 2] != -1L) live.gap = text(out[at + 2])
+                        if (out[at + 3] != -1L) live.toLeader = text(out[at + 3])
+                        if (out[at + 4] != -1L) live.ahead = text(out[at + 4])
+                    }
+                    live.snap(time)
+                }
+            } finally {
+                // Release all complex JSON trees before the next record,
+                // including the early return to the whole-record fallback.
+                rows.fill(null, 0, count)
             }
             accepted++
             return true

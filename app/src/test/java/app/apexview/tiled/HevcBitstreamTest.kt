@@ -57,6 +57,30 @@ class HevcBitstreamTest {
         }
     }
 
+    @Test fun reusableRbspScratchMatchesOwnedProofAndRejectsInvalidTail() {
+        val scratch = ByteArray(8192) { 0x7f }
+        val samples = listOf(byteArrayOf(0, 0, 3, 1, 0x7f), byteArrayOf(0x55), byteArrayOf())
+        for (sample in samples) {
+            val count = HevcBitstream.ebspToRbspInto(sample, 0, sample.size, scratch)
+            val expected = HevcBitstream.ebspToRbsp(sample)
+            assertArrayEquals(expected, scratch.copyOf(count))
+            val bits = HevcBitReader(scratch, count)
+            for (value in expected) assertEquals(value.toInt() and 255, bits.readBits(8))
+            assertEquals(0, bits.bitsRemaining)
+            assertThrows(IllegalArgumentException::class.java) { bits.readBit() }
+        }
+        // A malformed byte near the end of the original 8 KiB proof range
+        // must still reject, even when the syntactic header is short.
+        val invalid = ByteArray(8192) { 0x55 }
+        invalid[8188] = 0
+        invalid[8189] = 0
+        invalid[8190] = 3
+        invalid[8191] = 4
+        assertThrows(IllegalArgumentException::class.java) {
+            HevcBitstream.ebspToRbspInto(invalid, 0, invalid.size, scratch)
+        }
+    }
+
     @Test fun headerViewDoesNotCopyNALButOwnedParserStillDoes() {
         val hugeNal = ByteArray(500_000)
         hugeNal[0] = 0x26
