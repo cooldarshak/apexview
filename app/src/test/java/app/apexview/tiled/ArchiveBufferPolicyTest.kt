@@ -16,6 +16,12 @@ class ArchiveBufferPolicyTest {
         assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand, 2000, false))
         assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand.copy(advancing = false), 2000, true))
         assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand.copy(bufferedMs = 24_999), 2000, true))
+        assertEquals(1, ArchiveBufferPolicy.localWarmLimit(2, demand.copy(bufferedMs = 25_000), 3000, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand, 3001, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, demand, 999, true))
+        assertEquals(2, ArchiveBufferPolicy.localWarmLimit(2, null, 2000, true))
+        assertEquals(0, ArchiveBufferPolicy.localWarmLimit(0, demand, 2000, true))
+        assertEquals(1, ArchiveBufferPolicy.localWarmLimit(1, demand, 2000, true))
     }
 
     @Test fun localDeliveryRetiresOnlyOlderDeliveredUnpinnedBackingInSameEpoch() {

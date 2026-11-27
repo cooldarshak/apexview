@@ -380,12 +380,20 @@ class ProductionWiringTests(unittest.TestCase):
         # and before each speculative fetch.
         self.assertIn("warmLimit = next", session)
         self.assertIn("ArchiveBufferPolicy.speculativeWarmLimit(status)", session)
-        self.assertIn("val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(warmLimit, headroom, observed.input, observed.output)", session)
+        # M19 combines the thermal cap with fresh local playback demand before
+        # applying memory admission. Shared Cast owners retain the original cap.
+        self.assertRegex(session, r"val localLimit = ArchiveBufferPolicy\.localWarmLimit\(warmLimit, nativeDemand,\s*android\.os\.SystemClock\.elapsedRealtime\(\), owners\.get\(\) == 1 && !baseReleased\.get\(\)\)")
+        self.assertIn("val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)", session)
         self.assertIn("NativeStitchingDeviceBudget.observePressure(headroom)", session)
         self.assertIn("if (NativeStitchingDeviceBudget.observePressure(currentMemory)) break", session)
         self.assertIn("!closed && memoryWarmLimit > 0", session)
         self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)", session)
-        self.assertIn("candidate - number > warmLimit", session)
+        # An already scheduled second group must recheck the live local
+        # demand, not just reuse the limit captured by the scheduling thread.
+        worker = session.split("for (candidate in next)", 1)[1].split("private fun preemptUnrelatedWarmup", 1)[0]
+        self.assertRegex(worker, r"val currentLimit = ArchiveBufferPolicy\.localWarmLimit\(warmLimit, nativeDemand,\s*android\.os\.SystemClock\.elapsedRealtime\(\), owners\.get\(\) == 1 && !baseReleased\.get\(\)\)")
+        self.assertIn("if (closed || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break", worker)
+        self.assertLess(worker.index("candidate - number > currentLimit"), worker.index("delivery.obtain(candidate, copyForCaller = false)"))
         self.assertRegex(session, r"if \(candidate - number > ArchiveBufferPolicy\.memoryWarmLimit\(warmLimit, currentMemory,\s*currentSizes\.input, currentSizes\.output\)\) break")
         policy = contents(prefix + "tiled/ArchiveBufferPolicy.kt")
         self.assertIn("if (headroom == null) return thermalLimit", policy)
