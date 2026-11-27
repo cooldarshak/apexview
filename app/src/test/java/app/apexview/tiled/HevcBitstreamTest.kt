@@ -6,6 +6,20 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class HevcBitstreamTest {
+    @org.junit.Test fun bitReaderMatchesScalarReferenceAcrossEveryAlignmentAndWidth() {
+        val bytes = ByteArray(12) { (it * 47 + 137).toByte() }
+        for (offset in 0..63) for (width in 0..32) {
+            val reader = HevcBitReader(bytes)
+            repeat(offset) { reader.readBit() }
+            var expected = 0
+            for (i in offset until offset + width) {
+                expected = (expected shl 1) or ((bytes[i / 8].toInt() ushr (7 - i % 8)) and 1)
+            }
+            org.junit.Assert.assertEquals("offset=$offset width=$width", expected, reader.readBits(width))
+            org.junit.Assert.assertEquals(offset + width, reader.positionBits)
+        }
+    }
+
 
     @Test fun splitsThreeAndFourByteAnnexBStartCodes() {
         val stream = byteArrayOf(

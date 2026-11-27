@@ -432,6 +432,22 @@ class ArchitectureGBAndroidTest {
         Log.i("PitwallGC", "Compact direct slot transfer, exact parity and stale lease rejection PASS")
     }
 
+    @Test
+    fun nativeImmutableReferenceComparisonChecksEveryChunkAndLength() {
+        val bytes = ByteArray(48 * 1024 + 3) { (it * 31).toByte() }
+        requireNotNull(NativeFragmentLease.build(bytes.size) { it.put(bytes) }).use { lease ->
+            assertTrue(lease.matches(bytes))
+            for (index in listOf(0, 16383, 16384, 32768, bytes.lastIndex)) {
+                val changed = bytes.copyOf()
+                changed[index] = (changed[index].toInt() xor 1).toByte()
+                assertFalse(lease.matches(changed))
+            }
+            assertFalse(lease.matches(bytes.copyOf(bytes.size - 1)))
+            lease.retain().use { retained -> assertTrue(retained.matches(bytes)) }
+            assertTrue(lease.matches(bytes))
+        }
+    }
+
     private fun verifyNativeRelayOwnership() {
         val bytes = byteArrayOf(11, 22, 33, 44)
         val native = requireNotNull(NativeFragmentLease.build(bytes.size) { it.put(bytes) })

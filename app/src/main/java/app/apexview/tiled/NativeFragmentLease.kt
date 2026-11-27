@@ -69,7 +69,7 @@ internal class NativeFragmentLease private constructor(private val shared: Share
         check(!closed)
         if (bytes.size != size) return false
         return synchronized(shared) {
-            requireNotNull(shared.buffer).asReadOnlyBuffer().apply { position(0) } == ByteBuffer.wrap(bytes)
+            NativeStitchingEngine.fragmentMatches(requireNotNull(shared.buffer), bytes)
         }
     }
 

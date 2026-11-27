@@ -475,6 +475,35 @@ pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragm
         }
     })).unwrap_or(std::ptr::null_mut())
 }
+/// Compare a private immutable lease with an independent heap reference.
+/// The Java shared-owner monitor keeps the direct view alive; JNI copies only
+/// bounded chunks and never pins or duplicates the entire reference array.
+#[no_mangle]
+pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentMatches(
+    env: JNIEnv<'_>, _class: JClass<'_>, buffer: JByteBuffer<'_>, reference: jni::objects::JByteArray<'_>,
+) -> jint {
+    let result = catch_unwind(AssertUnwindSafe(|| -> Option<bool> {
+        let len = usize::try_from(env.get_array_length(&reference).ok()?).ok()?;
+        if len == 0 || len > 64 * 1024 * 1024 || env.get_direct_buffer_capacity(&buffer).ok()? != len {
+            return None;
+        }
+        let ptr = env.get_direct_buffer_address(&buffer).ok()?;
+        // SAFETY: private immutable direct lease held by Java until return.
+        // Length is checked against capacity; no borrowed address escapes.
+        let actual = unsafe { slice::from_raw_parts(ptr.cast_const(), len) };
+        let mut scratch = [0i8; 16 * 1024];
+        for (index, part) in actual.chunks(scratch.len()).enumerate() {
+            env.get_byte_array_region(&reference, (index * scratch.len()) as i32,
+                &mut scratch[..part.len()]).ok()?;
+            // SAFETY: i8/u8 have identical size/alignment and the requested
+            // extent was initialized by GetByteArrayRegion.
+            let expected = unsafe { slice::from_raw_parts(scratch.as_ptr().cast::<u8>(), part.len()) };
+            if part != expected { return Some(false); }
+        }
+        Some(true)
+    }));
+    match result { Ok(Some(true)) => 1, Ok(Some(false)) => 0, Ok(None) => INVALID, Err(_) => PANIC }
+}
 #[no_mangle]
 pub extern "system" fn Java_app_apexview_tiled_NativeStitchingEngine_nativeFragmentRelease(
     _env: JNIEnv<'_>, _class: JClass<'_>, id: jlong,

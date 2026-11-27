@@ -149,6 +149,7 @@ public final class NativeStitchingEngine implements AutoCloseable {
     private static native long nativeFragmentAllocateBounded(int size,long limit);
     private static native long nativeFragmentAllocateHeadroom(int size,long incremental);
     private static native ByteBuffer nativeFragmentView(long id);
+    private static native int nativeFragmentMatches(ByteBuffer buffer, byte[] reference);
     private static native long nativeFragmentRelease(long id);
     private static native void nativeFragmentTrim();
     private static native long[] nativeFragmentMemorySnapshot();
@@ -177,6 +178,18 @@ public final class NativeStitchingEngine implements AutoCloseable {
         return nativeAbi() == 2 ? nativeFragmentAllocateHeadroom(size,incremental) : INVALID;
     }
     static ByteBuffer fragmentView(long id) { return nativeFragmentView(id); }
+    static boolean fragmentMatches(ByteBuffer buffer, byte[] reference) {
+        try {
+            int result = nativeFragmentMatches(buffer, reference);
+            if (result == 1) return true;
+            if (result == 0) return false;
+            throw new IllegalStateException("Native fragment comparison rejected: " + result);
+        } catch (LinkageError olderAbi) {
+            ByteBuffer view = buffer.asReadOnlyBuffer();
+            view.position(0);
+            return view.equals(ByteBuffer.wrap(reference));
+        }
+    }
     static long releaseFragment(long id) { return nativeFragmentRelease(id); }
     static void trimFragments() { if (libraryReady) nativeFragmentTrim(); }
 

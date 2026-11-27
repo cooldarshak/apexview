@@ -153,11 +153,17 @@ internal class HevcBitReader(private val data: ByteArray) {
         require(count in 0..32) { "Bit count must be between 0 and 32" }
         require(count <= bitsRemaining) { "Unexpected end of HEVC bitstream" }
         var value = 0
-        repeat(count) {
-            val byte = data[bitOffset / 8].toInt() and 0xff
-            val bit = (byte ushr (7 - bitOffset % 8)) and 1
-            value = (value shl 1) or bit
-            bitOffset++
+        var remaining = count
+        // Keep the independent JVM proof, consuming a byte's available bits
+        // together rather than visiting each bit in a separate loop.
+        while (remaining > 0) {
+            val available = 8 - (bitOffset and 7)
+            val take = minOf(remaining, available)
+            val byte = data[bitOffset ushr 3].toInt() and 0xff
+            val part = (byte ushr (available - take)) and ((1 shl take) - 1)
+            value = (value shl take) or part
+            bitOffset += take
+            remaining -= take
         }
         return value
     }

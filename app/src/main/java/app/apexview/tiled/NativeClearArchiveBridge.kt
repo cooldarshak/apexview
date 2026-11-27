@@ -167,9 +167,14 @@ internal class NativeClearArchiveBridge(
         fun referenceOutput(): HevcClearCmafGridComposer.Output {
             baseline?.let { return it }
             computingReference = true
+            val started = System.nanoTime()
             val out = reference()
             computingReference = false
             baseline = out
+            Log.i("ApexviewSingleDecoder", "GB_CLEAR_REFERENCE generation=${selected.epoch} " +
+                "wallMs=${(System.nanoTime() - started) / 1_000_000L} parseMs=${out.parseMs} " +
+                "rewriteMs=${out.rewriteMs} packageMs=${out.packageMs} " +
+                "parseCpuMs=${out.parseCpuMs} rewriteCpuMs=${out.rewriteCpuMs} packageCpuMs=${out.packageCpuMs}")
             return out
         }
         fun fallback(failureReason: String): Produced {
@@ -335,8 +340,11 @@ internal class NativeClearArchiveBridge(
             reason = "NATIVE_CLEAR_PARITY_MISMATCH"
             require(out.initialization.contentEquals(expectedInit))
             baseline?.let {
+                val proofStarted = System.nanoTime()
                 require(out.initialization.contentEquals(it.initializationSegment) &&
                     out.matches(it.mediaFragments))
+                Log.i("ApexviewSingleDecoder", "GB_CLEAR_REFERENCE_MATCH generation=${selected.epoch} " +
+                    "wallMs=${(System.nanoTime() - proofStarted) / 1_000_000L} bytes=${out.sizes.sumOf { size -> size.toLong() }}")
             }
             // Independently verify every output sample's timing and flags.
             // Sizes change by design when tiles are composed.
