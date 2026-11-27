@@ -232,7 +232,8 @@ class DriverLaps internal constructor(
     /** Whether the driver was out of the race at [utcMs]. */
     fun retiredAt(utcMs: Long): Boolean = retiredAtSnapshot(snapshotTimeline.floorIndex(utcMs))
     internal fun retiredAtSnapshot(index: Int): Boolean =
-        index in states.indices && ((states as? CompactDriverSnapshots)?.retiredAt(index) ?: states[index].retired)
+        index in states.indices && ((states as? CompactDriverSnapshots)?.retiredAt(index)
+            ?: (states as? RollingDriverSnapshots.Frozen)?.retiredAt(index) ?: states[index].retired)
 
     /** When the driver's current spell in the pit lane began, if they're in it at [utcMs]. */
     fun inPitSince(utcMs: Long): Long? {
@@ -344,7 +345,7 @@ object DriverTimingParser {
         fun copyRange(first: Int, end: Int): LongArray = values.copyOfRange(first, end)
     }
 
-    private class Live {
+    private class Live(nativeRequested: Boolean) {
         var position: Int? = null
         val sector = arrayOfNulls<SectorCell>(3)
         val sectorFlags = Array(3) { BooleanArray(2) }   // personal, overall
@@ -373,7 +374,7 @@ object DriverTimingParser {
         var stopped = false
         var laps: Int? = null
         val times = Timestamps()
-        val snaps = ArrayList<DriverLaps.Snapshot>()
+        val snaps = RollingDriverSnapshots(nativeRequested)
         val crossings = Timestamps()
         val lapTimes = Timestamps()
         val lapCounts = ArrayList<Int>()
@@ -400,8 +401,8 @@ object DriverTimingParser {
                 lapSectors.indices.all { sameCell(old[it], lapSectors[it]) }
             } ?: lapSectors.toList()
             val copy = DriverLaps.Snapshot(position, currentSectors, completedSectors, lastLap, gap, inPit, toLeader, ahead, retired, bestLap, stopped)
-            if (times.lastOrNull() == t) snaps[snaps.lastIndex] = copy
-            else { times += t; snaps += copy }
+            if (times.lastOrNull() == t) snaps.replaceLast(copy)
+            else { times += t; snaps.append(copy) }
         }
 
     }
@@ -422,7 +423,7 @@ object DriverTimingParser {
 
     private fun materialize(drivers: Map<String, Live>, copySnapshots: Boolean) =
         drivers.mapValues { (_, driver) ->
-            DriverLaps(driver.times.toLongArray(), if (copySnapshots) driver.snaps.toList() else driver.snaps,
+            DriverLaps(driver.times.toLongArray(), driver.snaps.snapshot(),
                 driver.crossings.toLongArray(), driver.lapTimes.toLongArray(), driver.lapCounts.toIntArray())
         }
 
@@ -491,7 +492,7 @@ object DriverTimingParser {
             states.accept(rows, time)
             rows.keys().forEach { number ->
                 val row = rows.optJSONObject(number) ?: return@forEach
-                val driver = drivers.getOrPut(number) { Live() }
+                val driver = drivers.getOrPut(number) { Live(nativeRequested) }
                 apply(driver, row, time, statusPolicy)
                 driver.snap(time)
             }
@@ -587,7 +588,7 @@ object DriverTimingParser {
             if (event.source == 0) stateHistory?.accept(lines, event.time)
             lines.keys().forEach { number ->
                 val d = lines.optJSONObject(number) ?: return@forEach
-                val live = drivers.getOrPut(number) { Live() }
+                val live = drivers.getOrPut(number) { Live(nativeRequested) }
                 apply(live, d, event.time, statusPolicy, event.source)
                 live.snap(event.time)
             }
