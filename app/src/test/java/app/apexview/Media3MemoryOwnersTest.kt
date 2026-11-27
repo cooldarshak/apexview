@@ -39,6 +39,25 @@ class Media3MemoryOwnersTest {
             Media3MemoryOwners.unregister(host)
         }
     }
+    @Test fun poolTrimRetainsActiveBlocksAndExplicitReserve() {
+        val allocator = DefaultAllocator(true, 1024)
+        allocator.setTargetBufferSize(16 * 1024)
+        val blocks = List(8) { allocator.allocate() }
+        blocks.drop(1).forEach { allocator.release(it) }
+        assertEquals(7 * 1024, allocator.unusedBytesAllocated)
+        assertEquals(5 * 1024L, Media3MemoryOwners.trimFreeBlocks(allocator, 2 * 1024))
+        assertEquals(1024, allocator.totalBytesAllocated)
+        assertEquals(2 * 1024, allocator.unusedBytesAllocated)
+        assertEquals(0L, Media3MemoryOwners.trimFreeBlocks(allocator, 2 * 1024))
+        assertEquals(2 * 1024L, Media3MemoryOwners.trimFreeBlocks(allocator, 0))
+        assertEquals(1024, allocator.totalBytesAllocated)
+        val next = allocator.allocate()
+        assertEquals(2 * 1024, allocator.totalBytesAllocated)
+        allocator.release(next)
+        allocator.release(blocks.first())
+        Media3MemoryOwners.trimFreeBlocks(allocator, 0)
+        assertEquals(0, allocator.unusedBytesAllocated)
+    }
     @Test fun trimKeepsOutstandingAllocationsAndUnregistersBothPlayers() {
         val initial = Media3MemoryOwners.snapshot()
         val a = DefaultAllocator(true,1024)

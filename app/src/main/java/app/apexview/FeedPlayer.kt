@@ -278,6 +278,12 @@ class FeedPlayer(
     private var activeAudioDecoders = 0
     private val memoryLoads = Media3LoadLedger()
     private var memoryOwnerRetired = false
+    private var trimAfterSeek = false
+    private fun trimInactivePool() {
+        if (parkedForArchive || (remotePlaybackSuspended && activeVideoDecoderCount == 0 && activeAudioDecoders == 0)) {
+            Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
+        }
+    }
     private fun updateMemoryOwner() {
         if (memoryOwnerRetired) return
         val role = when {
@@ -621,7 +627,11 @@ class FeedPlayer(
                 buffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_IDLE && parkedForArchive) {
                     memoryLoads.clearPending()
-                    playbackAllocator.trim()
+                    Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
+                }
+                if (playbackState == Player.STATE_READY && trimAfterSeek) {
+                    trimAfterSeek = false
+                    Media3MemoryOwners.trimFreeBlocks(playbackAllocator)
                 }
                 updateMemoryOwner()
                 playbackEvent("state", "state=$playbackState positionMs=${player.currentPosition} bufferedMs=${player.bufferedPosition}")
@@ -646,7 +656,10 @@ class FeedPlayer(
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) sceneCodecCorrelation.reset()
-                if (reason == Player.DISCONTINUITY_REASON_SEEK) bufferEpisodes.onSeek(android.os.SystemClock.elapsedRealtime())
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+                    bufferEpisodes.onSeek(android.os.SystemClock.elapsedRealtime())
+                    trimAfterSeek = true
+                }
                 if (DiagnosticLogs.recording && reason == Player.DISCONTINUITY_REASON_SEEK) {
                     pendingSeekAtMs = android.os.SystemClock.elapsedRealtime()
                     seekSequence++
@@ -727,6 +740,7 @@ class FeedPlayer(
             }
             override fun onAudioDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 activeAudioDecoders = (activeAudioDecoders - 1).coerceAtLeast(0)
+                trimInactivePool()
                 updateMemoryOwner()
             }
             override fun onVideoDecoderInitialized(
@@ -754,6 +768,7 @@ class FeedPlayer(
                 activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
                 playbackEvent("codec-owner-release", "decoder=$decoderName count=$activeVideoDecoderCount actualCodecBytes=NOT_MEASURED")
                 if (activeVideoDecoderCount == 0) { decoder = ""; nativeSourceRendition = null }
+                trimInactivePool()
                 updateMemoryOwner()
                 refresh()
             }
@@ -1242,7 +1257,7 @@ class FeedPlayer(
         player.stop()
         player.clearMediaItems()
         memoryLoads.clearPending()
-        playbackAllocator.trim()
+        Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
         updateMemoryOwner()
         playbackEvent("archive-parked", "items=${player.mediaItemCount} allocatorBytes=${playbackAllocator.totalBytesAllocated}")
     }
@@ -1532,7 +1547,7 @@ class FeedPlayer(
         } finally {
             try {
                 Media3MemoryOwners.unregister(playbackAllocator)
-                playbackAllocator.trim()
+                Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
             } finally {
                 try { archive?.close() } finally { protectedSource?.release() }
             }
