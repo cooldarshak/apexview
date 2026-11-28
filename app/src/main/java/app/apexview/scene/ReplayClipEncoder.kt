@@ -29,8 +29,8 @@ internal class ReplayClipEncoder(
     private val width: Int,
     private val height: Int,
     private val castSample: ((BakedCastTransportStream.Sample) -> Unit)? = null,
-    private val nativeRequested: () -> Boolean = { false },
     private val castGroup: Long? = null,
+    private val nativeRequested: () -> Boolean = { false },
 ) {
     private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
     private fun recordGraphicsOwner() {
@@ -315,7 +315,7 @@ internal class ReplayClipEncoder(
         steps.run("pending-file") {
             if (!published) oldDestination?.let { resolver.delete(it, null, null) }
         }
-        SceneGraphicsOwners.process.remove(graphicsOwnerId)
+        SceneGraphicsOwners.process.remove(graphicsOwnerId, steps.failedCount)
     }
 
     /** Live sessions never publish a MediaStore file; stop without finalizing an MP4. */

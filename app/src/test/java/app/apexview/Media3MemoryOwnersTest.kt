@@ -119,4 +119,20 @@ class Media3MemoryOwnersTest {
         }
         assertEquals(initial,Media3MemoryOwners.snapshot())
     }
+    @Test fun successfulReleaseWithLateReaderIsPendingUntilReturned() {
+        val backing = DefaultAllocator(true, 1024)
+        val ledger = Media3SourceAllocationLedger()
+        val source = ledger.allocator(backing, Media3SourceAllocationLedger.Kind.ARCHIVE_VIDEO)
+        Media3MemoryOwners.register(backing, "successful-late-reader", ledger)
+        val block = source.allocate()
+        fun failures() = Regex("media3UnverifiedRetirements=(\\d+)").find(Media3MemoryOwners.ownerFields())!!.groupValues[1]
+        val before = failures()
+        try {
+            Media3MemoryOwners.retire(backing, true)
+            assertEquals(before, failures())
+            assertTrue(Media3MemoryOwners.ownerFields().contains("successful-late-reader:RETIRE_PENDING:1024"))
+        } finally { source.release(block) }
+        assertFalse(Media3MemoryOwners.ownerFields().contains("successful-late-reader:"))
+        assertEquals(before, failures())
+    }
 }

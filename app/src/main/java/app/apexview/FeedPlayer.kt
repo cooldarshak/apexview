@@ -228,9 +228,11 @@ class FeedPlayer(
     internal fun setComposedOutputDisplay(owner: Any, displayId: Int?) {
         if (displayId == null) {
             if (outputDisplayOwner !== owner) return
+            steadyFreeTrim.reset()
             outputDisplayOwner = null
             outputCadence.activeDisplayId = -1
         } else {
+            if (outputDisplayOwner !== owner || outputCadence.activeDisplayId != displayId) steadyFreeTrim.reset()
             outputDisplayOwner = owner
             outputCadence.activeDisplayId = displayId
         }
@@ -374,6 +376,10 @@ class FeedPlayer(
         return Triple(allocated, archiveOptionalSoftBudgetBytes, (highUs + 999L) / 1000L)
     }
     private var archiveBufferSourceToken: Any? = null
+        set(value) {
+            if (field !== value) steadyFreeTrim.reset()
+            field = value
+        }
 
     private var parkedForArchive = false
     private var activeAudioDecoders = 0
@@ -381,17 +387,10 @@ class FeedPlayer(
     private var memoryOwnerRetired = false
     private var trimAfterSeek = false
     private val steadyFreeTrim = SteadyArchiveFreeTrimPolicy()
-    private var steadyTrimSource: Any? = null
-    private var steadyTrimDisplay: Any? = null
     internal fun observeSteadyArchiveFreePool(enabled: Boolean) {
         if (memoryOwnerRetired) return
         val source = archiveBufferSourceToken
         val display = outputDisplayOwner
-        if (steadyTrimSource !== source || steadyTrimDisplay !== display) {
-            steadyFreeTrim.reset()
-            steadyTrimSource = source
-            steadyTrimDisplay = display
-        }
         val eligible = enabled && source != null && display != null && archiveVodSession != null &&
             !parkedForArchive && !remotePlaybackSuspended && !trimAfterSeek && firstFrameRendered &&
             player.playbackState == Player.STATE_READY && player.isPlaying && player.playWhenReady
@@ -1773,8 +1772,6 @@ class FeedPlayer(
         archiveBufferSourceToken = null
         memoryOwnerRetired = true
         steadyFreeTrim.reset()
-        steadyTrimSource = null
-        steadyTrimDisplay = null
         memoryLoads.clearPending()
         outputCadence.composedSingle = false
         outputDisplayOwner = null

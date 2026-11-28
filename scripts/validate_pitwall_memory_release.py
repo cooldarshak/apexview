@@ -98,6 +98,17 @@ def require_matrix(report):
                 require(any(r["delivery"] == delivery and (r["feed_count"] > 1) == multiple
                             and r["overlay"] == overlay and r["speed"] == 1 for r in routes),
                         f"Missing paired local route {delivery}/{overlay}/multi={multiple}")
+    # Require the complete local TCL Software DRM ON cross-combinations,
+    # not disjoint rows that individually satisfy a dimension of the matrix.
+    for mode in ("SINGLE", "MULTIPLE"):
+        for protection in ("CLEAR_HEVC", "WIDEVINE_HEVC"):
+            for multiple in (False, True):
+                for overlay in ("OFF", "MAP", "TOWER", "BOTH"):
+                    require(any(r["delivery"] == "ANDROID_TV" and r["software_drm"] is True and
+                                r["decoder_mode"] == mode and r["protection"] == protection and
+                                (r["feed_count"] > 1) == multiple and r["overlay"] == overlay and
+                                r["speed"] == 1 for r in routes),
+                            f"Missing paired TV Software DRM ON {mode}/{protection}/multi={multiple}/{overlay}")
     for speed in (1, 1.5):
         for overlay in ("OFF", "MAP", "TOWER", "BOTH"):
             require(any(r["delivery"] == "PHONE" and r["device"] == "SM-S908E" and

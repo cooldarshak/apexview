@@ -118,7 +118,9 @@
             "software_drm",
             "screen_state",
             "codec",
-            "thermal_start"
+            "thermal_start",
+            "output_geometry",
+            "playback_start_ms"
           ]
         },
         "thermal_end": {

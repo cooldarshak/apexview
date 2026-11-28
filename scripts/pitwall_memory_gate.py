@@ -26,7 +26,8 @@ CANDIDATE_FAILURE_FIELDS = ("media3UnverifiedRetirements",)
 MATCH = ("device", "firmware", "content_id", "source_profile", "decoder_mode",
          "protection", "delivery", "feed_count", "overlay", "speed",
          "display_policy", "display_hz", "cache_state", "network_profile",
-         "renderer", "software_drm", "screen_state", "codec", "thermal_start")
+         "renderer", "software_drm", "screen_state", "codec", "thermal_start",
+         "output_geometry", "playback_start_ms")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 FIELD = re.compile(r"\b(\w+)=([^\s]+)")
@@ -116,6 +117,9 @@ def evaluate_run(run, root, candidate=False):
             type(run["thermal_end"]) is int and run["thermal_end"] in range(3) and
             abs(run["thermal_end"] - scenario["thermal_start"]) <= 1, "Thermally confounded run")
     require(number(scenario["display_hz"]) > 0, "Invalid display rate")
+    require(isinstance(scenario["output_geometry"], str) and scenario["output_geometry"].strip() and
+            type(scenario["playback_start_ms"]) is int and scenario["playback_start_ms"] >= 0,
+            "Missing matched output geometry or replay timestamp")
     require(run.get("profiled") is False, "Profiler sessions cannot establish PSS acceptance")
     log = artifact(root, run["memory_log"])
     # Separate evidence for actual output and functional checks, reviewed by owner.

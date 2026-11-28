@@ -12,6 +12,7 @@ class MemoryGateTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.scenario = dict(device="SM-S908E", firmware="firmware", content_id="replay",
             source_profile="1080p+3x540p@50", decoder_mode="SINGLE", protection="CLEAR_HEVC",
+            output_geometry="FIXED:1631x730", playback_start_ms=123000,
             delivery="PHONE", feed_count=4, overlay="BOTH", speed=1, display_policy="FIXED",
             display_hz=100, cache_state="warm", network_profile="wifi", renderer="surface",
             software_drm=False, screen_state="ON", codec="codec", thermal_start=0)
@@ -19,14 +20,7 @@ class MemoryGateTest(unittest.TestCase):
     def evidence(self, name, content):
         data = content.encode()
         (self.root / name).write_bytes(data)
-        return {"path": name, "sha256": hashlib.sha256(data).hexdigest()    def test_individual_peak_cannot_hide_behind_group_median(self):
-        manifest = self.manifest()
-        manifest["pairs"][0]["candidate"] = self.run_data(3, True, 548)
-        report = evaluate(manifest, self.root)
-        self.assertGreater(report["issues"], 0)
-        self.assertIn("pss_peak_mib paired repetition regressed", report["routes"][0]["issues"])
-
-}
+        return {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
 
     def run_data(self, index, candidate, pss=500, missing=False, retained=None):
         active_start, active_end, stop = 40000, 640000, 650000
@@ -121,3 +115,14 @@ class MemoryGateTest(unittest.TestCase):
         run = self.run_data(0, True, retained="media3UnverifiedRetirements")
         with self.assertRaisesRegex(ValueError, "Unverified Media3 retirement"):
             evaluate_run(run, self.root, candidate=True)
+
+    def test_individual_peak_cannot_hide_behind_group_median(self):
+        manifest = self.manifest()
+        run = manifest["pairs"][0]["candidate"]
+        name = run["memory_log"]["path"]
+        content = (self.root / name).read_text()
+        run["memory_log"] = self.evidence(name, content.replace("pssKiB=512000", "pssKiB=561152", 1))
+        report = evaluate(manifest, self.root)
+        self.assertGreater(report["issues"], 0)
+        self.assertIn("pss_peak_mib paired repetition regressed", report["routes"][0]["issues"])
+        self.assertNotIn("pss_p95_mib paired repetition regressed", report["routes"][0]["issues"])
