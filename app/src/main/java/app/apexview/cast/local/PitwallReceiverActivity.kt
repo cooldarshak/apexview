@@ -925,7 +925,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onPlaybackParametersChanged(parameters: androidx.media3.common.PlaybackParameters) {
                 if (player === next && desiredSpeed != parameters.speed) {
                     correlation.reset()
-                codecReleaseTiming.resetEpoch()
+                    codecReleaseTiming.resetEpoch()
                     desiredSpeed = parameters.speed
                 }
             }

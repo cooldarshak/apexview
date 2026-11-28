@@ -3574,8 +3574,10 @@ class AppState(
                 var lastEvidenceAt = 0L
                 var readySince: Long? = null
                 while (true) {
+                    val optionalDemand = host.feed.archiveOptionalDemand(playbackSpeed)
                     prepared?.updateNativePlaybackDemand(host.feed.player.currentPosition,
-                        host.feed.player.totalBufferedDuration, playbackSpeed, playing && !host.feed.buffering)
+                        host.feed.player.totalBufferedDuration, playbackSpeed, playing && !host.feed.buffering,
+                        optionalDemand.first, optionalDemand.second, optionalDemand.third)
                     host.feed.problem?.let { throw IOException("Composed playback failed: $it") }
                     if (host.feed.hasRenderedFirstFrame && observedActiveVideoDecoders > 1) throw IOException("Expected one active video decoder; callbacks report $observedActiveVideoDecoders")
                     if (host.feed.hasRenderedFirstFrame && host.feed.activeVideoDecoderHardware == "hardware NO") throw IOException("Composed video selected a software decoder")

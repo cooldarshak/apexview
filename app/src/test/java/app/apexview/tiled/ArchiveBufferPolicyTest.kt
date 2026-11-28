@@ -24,6 +24,19 @@ class ArchiveBufferPolicyTest {
         assertEquals(1, ArchiveBufferPolicy.localWarmLimit(1, demand, 2000, true))
     }
 
+    @Test fun combinedForecastSuppressesOnlyOptionalWorkAboveQualifiedHighWatermark() {
+        val demand = ArchiveBufferPolicy.NativeDemand(1000, 30_000, 1f, true, 1000,
+            allocatorBytes = 40, softBudgetBytes = 55, qualifiedHighMs = 25_000)
+        assertEquals(0, ArchiveBufferPolicy.optionalWarmLimit(1, demand, 2000, true, 8, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand, 2000, true, 5, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand.copy(bufferedMs = 24_999), 2000, true, 8, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand, 2000, false, 8, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand, 3001, true, 8, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand.copy(advancing = false), 2000, true, 8, 10))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand, 2000, true, 8, null))
+        assertEquals(1, ArchiveBufferPolicy.optionalWarmLimit(1, demand.copy(qualifiedHighMs = 0), 2000, true, 8, 10))
+    }
+
     @Test fun localDeliveryRetiresOnlyOlderDeliveredUnpinnedBackingInSameEpoch() {
         val cache = BoundedArchiveFragmentCache(6, 100)
         val old = byteArrayOf(1, 2)

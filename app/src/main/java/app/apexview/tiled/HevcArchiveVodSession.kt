@@ -105,9 +105,10 @@ internal class HevcArchiveVodSession(
     private val media3DeliveredBytes = java.util.concurrent.atomic.AtomicLong()
     @Volatile private var nativeDemand: ArchiveBufferPolicy.NativeDemand? = null
 
-    fun updateNativePlaybackDemand(positionMs: Long, bufferedMs: Long, speed: Float, advancing: Boolean) {
+    fun updateNativePlaybackDemand(positionMs: Long, bufferedMs: Long, speed: Float, advancing: Boolean,
+                                   allocatorBytes: Long = 0L, softBudgetBytes: Long = 0L, qualifiedHighMs: Long = 0L) {
         nativeDemand = ArchiveBufferPolicy.NativeDemand(positionMs.coerceAtLeast(0L), bufferedMs.coerceAtLeast(0L),
-            speed, advancing, android.os.SystemClock.elapsedRealtime())
+            speed, advancing, android.os.SystemClock.elapsedRealtime(), allocatorBytes, softBudgetBytes, qualifiedHighMs)
         if (advancing && positionMs >= 0L) synchronized(cacheLock) {
             if (!closed && owners.get() == 1 && !baseReleased.get())
                 cache.retirePlayed(segmentAt(ArchiveTimelineSearch.msToUs(positionMs)), localDeliveryEpoch)
@@ -408,9 +409,14 @@ internal class HevcArchiveVodSession(
         val localLimit = ArchiveBufferPolicy.localWarmLimit(warmLimit, nativeDemand,
             android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get())
         val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)
+        val budgetWarmLimit = ArchiveBufferPolicy.optionalWarmLimit(memoryWarmLimit, nativeDemand,
+            android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get(),
+            cache.memorySnapshot().unique, SpeculativeMemoryAdmission.charge(observed.input, observed.output))
+        if (memoryWarmLimit > 0 && budgetWarmLimit == 0)
+            android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_OPTIONAL_PREFETCH_SUPPRESSED reason=QUALIFIED_COMPRESSED_FORECAST foregroundUnchanged=true")
         synchronized(warmLock) {
-            if (!closed && requestEpoch == productionEpoch && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
-                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)
+            if (!closed && requestEpoch == productionEpoch && budgetWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
+                val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, budgetWarmLimit)
                 warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
@@ -426,6 +432,9 @@ internal class HevcArchiveVodSession(
                             currentSizes.input, currentSizes.output)) break
                         if (!cache.canSpeculate(candidate, currentSizes.output)) break
                         val estimate = SpeculativeMemoryAdmission.charge(currentSizes.input, currentSizes.output)
+                        if (ArchiveBufferPolicy.optionalWarmLimit(currentLimit, nativeDemand,
+                                android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get(),
+                                cache.memorySnapshot().unique, estimate) == 0) break
                         val reservation = if (currentMemory != null && estimate != null) {
                             SpeculativeMemoryAdmission.process.tryReserve(estimate,
                                 SpeculativeMemoryAdmission.limit(currentMemory)) ?: break

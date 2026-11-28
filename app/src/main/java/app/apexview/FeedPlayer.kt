@@ -313,6 +313,15 @@ class FeedPlayer(
     private val playbackAllocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
     private val sourceAllocations = Media3SourceAllocationLedger()
     private val archiveForwardBuffers = ArchiveForwardBufferPolicy()
+    private val archiveOptionalSoftBudgetBytes = initialArchiveSoftBudgetMiB.toLong() * 1024L * 1024L
+
+    /** Same selected-lane qualification as the archive LoadControl. Only
+     * optional upstream prefetch uses this separate conservative forecast. */
+    internal fun archiveOptionalDemand(speed: Float): Triple<Long, Long, Long> {
+        val highUs = archiveForwardBuffers.target(android.os.SystemClock.elapsedRealtime(), speed)?.highUs ?: 0L
+        val allocated = playbackAllocator.totalBytesAllocated.toLong() + playbackAllocator.unusedBytesAllocated.toLong()
+        return Triple(allocated, archiveOptionalSoftBudgetBytes, (highUs + 999L) / 1000L)
+    }
     private var archiveBufferSourceToken: Any? = null
 
     private var parkedForArchive = false

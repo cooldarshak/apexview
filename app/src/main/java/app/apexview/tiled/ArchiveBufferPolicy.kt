@@ -517,7 +517,9 @@ internal object ArchiveBufferPolicy {
         (seek || !cached) && active != requested
 
     data class NativeDemand(val positionMs: Long, val bufferedMs: Long, val speed: Float,
-                            val advancing: Boolean, val observedMs: Long)
+                            val advancing: Boolean, val observedMs: Long,
+                            val allocatorBytes: Long = 0L, val softBudgetBytes: Long = 0L,
+                            val qualifiedHighMs: Long = 0L)
 
     /** A fresh clock determines how much media time remains before demand.
      * A current/uncached seek or startup retains one segment of processing
@@ -531,6 +533,21 @@ internal object ArchiveBufferPolicy {
         val remainingBuffered = (demand.bufferedMs - elapsed).coerceAtLeast(0.0)
         val mediaAllowance = maxOf(durationMs.toDouble(), minOf(untilStart, remainingBuffered))
         return (mediaAllowance / demand.speed).toLong().coerceIn(1L, 5_000L)
+    }
+
+    /** Optional only: a fresh, qualified high watermark already protects required
+     * playback. Charge actual sample allocations, retained cache bytes and one
+     * conservative upstream group forecast without imposing a hard player cap.
+     * Missing qualification, paused/remote routes and stale observations fail open. */
+    fun optionalWarmLimit(limit: Int, demand: NativeDemand?, nowMs: Long, localOnly: Boolean,
+                          cacheBytes: Long, forecastBytes: Long?): Int {
+        if (!localOnly || demand == null || !demand.advancing ||
+            nowMs < demand.observedMs || nowMs - demand.observedMs > 2_000L ||
+            demand.qualifiedHighMs <= 0L || demand.bufferedMs < demand.qualifiedHighMs ||
+            demand.softBudgetBytes <= 0L || demand.allocatorBytes < 0L || cacheBytes < 0L ||
+            forecastBytes == null || forecastBytes < 0L) return limit
+        val remaining = demand.softBudgetBytes - demand.allocatorBytes.coerceAtMost(demand.softBudgetBytes)
+        return if (cacheBytes >= remaining || forecastBytes > remaining - cacheBytes) 0 else limit
     }
 
     /** Build 910 held 50–56s of Media3 data and up to two extra compressed
