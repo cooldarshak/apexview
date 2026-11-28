@@ -11,11 +11,14 @@ dest="/sdcard/Download"
 mkdir -p "$dest"
 case "$action" in
 start)
-  pid=$(pidof "$pkg") || { echo "Open Pitwall to its browse screen first"; exit 1; }
+  pm path "$pkg" | grep -q '^package:' || { echo "Expected installed Pitwall application ID $pkg"; exit 1; }
+  pid=$(pidof "$pkg" | awk 'NF == 1 {print $1}')
+  [ -n "$pid" ] || { echo "Open Pitwall to its browse screen first (one app PID required)"; exit 1; }
   if [ -e "$trace" ]; then
     echo "Existing capture at $trace; collect and move it before starting another"; exit 1
   fi
   printf 'engine=%s startPid=%s\n' "$engine" "$pid" > "$dest/$base-ownership.txt"
+  printf 'startUptimeSec=%s utc=%s\n' "$(awk '{print int($1)}' /proc/uptime)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$dest/$base-ownership.txt"
   dumpsys package "$pkg" | grep -E 'versionName=|versionCode=|pkgFlags=' >> "$dest/$base-ownership.txt" || true
   dumpsys meminfo "$pkg" >> "$dest/$base-ownership.txt"
   perfetto --query --long > "$dest/$base-producers.txt" 2>&1 || true
@@ -80,10 +83,14 @@ PITWALL_CONFIG
   ;;
 collect)
   [ -s "$trace" ] || { echo "No trace yet: $trace"; exit 1; }
-  pidof "$pkg" | sed 's/^/collectPid=/' >> "$dest/$base-ownership.txt" || true
+  startPid=$(sed -n 's/^engine=.* startPid=//p' "$dest/$base-ownership.txt")
+  collectPid=$(pidof "$pkg" | awk 'NF == 1 {print $1}')
+  [ -n "$collectPid" ] && [ "$startPid" = "$collectPid" ] || { echo "Process changed; capture is not comparable"; exit 1; }
+  printf 'collectPid=%s utc=%s\n' "$collectPid" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$dest/$base-ownership.txt"
   dumpsys meminfo "$pkg" >> "$dest/$base-ownership.txt"
   dumpsys SurfaceFlinger --list | grep -F "$pkg" >> "$dest/$base-ownership.txt" || true
   cp "$trace" "$dest/$base.perfetto-trace"
+  sha256sum "$dest/$base.perfetto-trace" >> "$dest/$base-ownership.txt" || echo TRACE_HASH_UNAVAILABLE >> "$dest/$base-ownership.txt"
   rm -f "/data/misc/perfetto-configs/$base.cfg"
   ls -l "$dest/$base.perfetto-trace"
   echo "Share the trace, ownership and producer text files plus the in-app diagnostic log."

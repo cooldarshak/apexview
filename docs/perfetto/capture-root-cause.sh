@@ -57,6 +57,7 @@ finish_trace() {
   if [ -s "$src" ]; then
     cp "$src" "$dir/$name.perfetto-trace"
     mark "$name-copied"
+    sha256sum "$dir/$name.perfetto-trace" >> "$dir/trace-sha256.txt" 2>/dev/null || echo "$name SHA256_UNAVAILABLE" >> "$manifest"
     wc -c < "$dir/$name.perfetto-trace" | awk -v n="$name" '{print n "_bytes=" $1}' >> "$manifest"
   else
     echo "$name TRACE_MISSING" >> "$manifest"
@@ -69,6 +70,7 @@ check_pid() {
 case "$action" in
 start)
   [ ! -e "$dir" ] || { echo "Run label already exists."; exit 1; }
+  pm path "$pkg" | grep -q '^package:' || { echo "Expected installed Pitwall application ID $pkg"; exit 1; }
   p=$(pid_now || true)
   [ -n "$p" ] || { echo "Open Pitwall browse screen first (one app PID required)."; exit 1; }
   mkdir -p "$dir"
@@ -76,7 +78,16 @@ start)
   touch "$dir/start-marker"
   printf 'run=%s package=%s diagnosticOnly=true\n' "$label" "$pkg" > "$manifest"
   dumpsys package "$pkg" | grep -E 'versionName=|versionCode=|pkgFlags=' > "$dir/build.txt" || true
-  perfetto --query > "$dir/producers.txt" 2>&1 || true
+  pm path "$pkg" > "$dir/apk-paths.txt"
+  apk=$(sed -n 's/^package:\(.*\/base\.apk\)$/\1/p' "$dir/apk-paths.txt" | head -n 1)
+  if [ -n "$apk" ] && [ -r "$apk" ]; then
+    sha256sum "$apk" > "$dir/apk-sha256.txt" || echo APK_HASH_UNAVAILABLE >> "$manifest"
+  else echo APK_HASH_UNAVAILABLE >> "$manifest"; fi
+  getprop ro.build.fingerprint > "$dir/firmware.txt"
+  perfetto --query > "$dir/producers.txt" 2>&1 || echo PRODUCER_QUERY_UNAVAILABLE >> "$manifest"
+  for producer in android.heapprofd linux.ftrace linux.process_stats android.surfaceflinger.frametimeline android.java_hprof; do
+    grep -Fq "$producer" "$dir/producers.txt" || echo "producer=$producer status=NOT_REPORTED" >> "$manifest"
+  done
   snapshot browse
   begin native 90 <<'CFG'
 buffers { size_kb: 32768 fill_policy: RING_BUFFER }

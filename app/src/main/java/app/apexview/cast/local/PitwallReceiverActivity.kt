@@ -837,7 +837,10 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
 
             override fun onPlaybackParametersChanged(parameters: androidx.media3.common.PlaybackParameters) {
-                if (player === next) desiredSpeed = parameters.speed
+                if (player === next && desiredSpeed != parameters.speed) {
+                    correlation.reset()
+                    desiredSpeed = parameters.speed
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) { if (player === next) fail("TV playback failed: ${error.errorCodeName}") }

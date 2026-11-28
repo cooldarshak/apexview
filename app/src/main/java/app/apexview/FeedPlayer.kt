@@ -726,6 +726,7 @@ class FeedPlayer(
             }
 
             override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                sceneCodecCorrelation.reset()
                 codecReleaseTiming.resetEpoch()
                 playbackEvent("playback-rate", "speed=${playbackParameters.speed}")
             }
