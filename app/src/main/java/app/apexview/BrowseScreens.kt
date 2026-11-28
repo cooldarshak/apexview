@@ -93,6 +93,9 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import coil.request.ImageRequest
+import coil.request.CachePolicy
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.focusGroup
@@ -402,6 +405,8 @@ internal fun ArtPage(
                 model = remember(image, reducedMotion) {
                     ImageRequest.Builder(context)
                         .data(F1TvApi.picture(image, 1920, 1080))
+                        // Full-size hero belongs to the visible painter, not the global memory cache.
+                        .memoryCachePolicy(CachePolicy.DISABLED)
                         .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
                         .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                         .build()
@@ -732,9 +737,15 @@ fun HomeScreen(app: AppState) {
     // CarouselArt, which loads its actual full-resolution artwork on demand.
     val context = LocalContext.current
     LaunchedEffect(picks, pager.settledPage) {
-        carouselPrefetchIndices(pager.settledPage, picks.size).forEach { index ->
-            F1TvApi.picture(pickImage(picks[index]), 640, 360)?.let { image ->
-                context.imageLoader.enqueue(ImageRequest.Builder(context).data(image).build())
+        // A LaunchedEffect owns the actual image requests, not just enqueue calls.
+        // On viewer entry/page changes, cancellation propagates to all prefetches.
+        coroutineScope {
+            carouselPrefetchIndices(pager.settledPage, picks.size).forEach { index ->
+                F1TvApi.picture(pickImage(picks[index]), 640, 360)?.let { image ->
+                    launch {
+                        context.imageLoader.execute(ImageRequest.Builder(context).data(image).size(640, 360).build())
+                    }
+                }
             }
         }
     }
@@ -998,6 +1009,8 @@ private fun CarouselArt(picks: List<Pick>, pager: PagerState) {
                     model = remember(image, reducedMotion) {
                         ImageRequest.Builder(context)
                             .data(F1TvApi.picture(image, 1920, 1080))
+                            // Full-size hero belongs to the visible painter, not the global memory cache.
+                            .memoryCachePolicy(CachePolicy.DISABLED)
                             .placeholderMemoryCacheKey(F1TvApi.picture(image, 640, 360))
                             .crossfade(if (reducedMotion) 0 else Motion.BROWSE_FADE_MS)
                             .build()

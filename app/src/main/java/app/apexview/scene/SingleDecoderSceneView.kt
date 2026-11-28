@@ -31,7 +31,7 @@ import androidx.media3.exoplayer.ExoPlayer
  * Logical windows sample regions of the already composed frame, with the usual layout/z order.
  * This renderer is used only for verified CLEAR media. Protected video keeps its secure path.
  */
-internal class SingleDecoderSceneView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
+internal class SingleDecoderSceneView(context: Context, independentLatchEnabled: Boolean = true) : TextureView(context), TextureView.SurfaceTextureListener {
     // BufferQueue backpressure can grow while the decoder texture waits for this
     // handler to run. Display priority helps latch callbacks without making the
     // UI thread do any GL work or introducing a second decoder/context.
@@ -41,7 +41,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     private var asyncInput: SceneAsyncTextureLatch? = null
     // A proven runtime fault retires the optional shared-context path once.
     // Rebind through the existing renderer with the same DRM protection.
-    private var asyncLatchDisabled = false
+    private var asyncLatchDisabled = !independentLatchEnabled
     private var lastAsyncSubmitted = 0L
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
@@ -634,6 +634,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         player = null
         surfaceTextureListener = null
         codecCorrelation = null
+        scene = null
+        onDisplaySelected = {}
+        onFailure = {}
+        onFirstFrame = {}
+        onOutputLost = {}
+        onOutputSize = { _, _ -> }
         // The framework still owns the attached SurfaceTexture when the
         // listener is removed. Only onSurfaceTextureDestroyed returning false
         // transfers that particular texture to our queued release.
@@ -710,6 +716,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             Log.w("PitwallGraphics", "Independent latch API unavailable; retaining original renderer", error)
             null
         }
+        Log.i("PitwallGraphics", "SCENE_LATCH_POLICY independent=${independent != null} disabled=$asyncLatchDisabled vendorBytes=NOT_MEASURED")
         asyncInput = independent
         val frames = independent?.frames ?: SurfaceTexture(texture)
         decoderTexture = frames

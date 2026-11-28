@@ -128,7 +128,8 @@ private class ThinningVideoRenderer(
     listener: VideoRendererEventListener?,
     private val outputCadence: AdaptivePlaybackCadenceObserver,
 ) : MediaCodecVideoRenderer(
-    context, DefaultMediaCodecAdapterFactory(context), selector, joiningMs, fallback, handler, listener,
+    context, ComposedCodecBufferFactory(DefaultMediaCodecAdapterFactory(context), outputCadence),
+    selector, joiningMs, fallback, handler, listener,
     DefaultRenderersFactory.MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
 ) {
     private val thinner = FrameThinner()
@@ -156,6 +157,17 @@ private class ThinningVideoRenderer(
         }
         android.util.Log.i("PitwallVideo", "TCL_CODED_PICTURE coded=${width}x$height display=${format.width}x${format.height}")
         return configuration
+    }
+
+    override fun onOutputFormatChanged(format: Format, mediaFormat: MediaFormat?) {
+        super.onOutputFormatChanged(format, mediaFormat)
+        if (outputCadence.composedSingle && DiagnosticLogs.recording) {
+            val reported = runCatching {
+                mediaFormat?.takeIf { it.containsKey(MediaFormat.KEY_LOW_LATENCY) }
+                    ?.getInteger(MediaFormat.KEY_LOW_LATENCY)?.toString()
+            }.getOrNull() ?: "UNREPORTED"
+            android.util.Log.i("PitwallGraphics", "CODEC_LOW_LATENCY_OUTPUT reported=$reported vendorPoolBytes=NOT_MEASURED")
+        }
     }
 
     override fun canReuseCodec(codecInfo: MediaCodecInfo, oldFormat: Format, newFormat: Format,

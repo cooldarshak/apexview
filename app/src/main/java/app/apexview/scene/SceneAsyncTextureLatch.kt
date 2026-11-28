@@ -163,7 +163,10 @@ internal class SceneAsyncTextureLatch private constructor(
             }
         } catch (error: Exception) {
             synchronized(lock) { faulted = true }
-            render.post { failure?.invoke(Fault(error)) }
+            render.post {
+                val callback = synchronized(lock) { if (closed) null else failure }
+                callback?.invoke(Fault(error))
+            }
         }
     }
 
@@ -208,6 +211,8 @@ internal class SceneAsyncTextureLatch private constructor(
         synchronized(lock) {
             if (closed) return
             closed = true
+            // A retired worker must not keep the viewer/host callbacks alive.
+            report = null; signal = null; failure = null
         }
         render.removeCallbacks(notifyRender)
         worker.removeCallbacksAndMessages(null)

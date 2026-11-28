@@ -159,13 +159,14 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("F1_SCENE_UI_ACTIVATED", rolling)
         self.assertIn("F1_SCENE_UI_BOUND", viewer)
         self.assertIn("AndroidView(factory = { context ->", viewer)
-        self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)", viewer)
+        self.assertIn("ProtectedDecoderSceneView(context, protectedOutput = secureRolling,", viewer)
         # Both EGL renderers must bind the registered host, using the same
         # source atlas translated into the actual output region when eligible.
         # Keep the original protection against rendering an unbound raw atlas.
-        for renderer in ("ProtectedDecoderSceneView(context, protectedOutput = secureRolling)",
-                         "SingleDecoderSceneView(context)"):
+        for renderer in ("ProtectedDecoderSceneView(context, protectedOutput = secureRolling,",
+                         "SingleDecoderSceneView(context,"):
             block = viewer.split(renderer, 1)[1].split("onRelease = { it.release() }", 1)[0]
+            self.assertIn("independentLatchEnabled = app.settings.independentTextureLatch", block)
             self.assertIn("it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation)", block)
         self.assertEqual(viewer.count(
             "it.bind(host.player, outputScene, app.playbackSpeed, host.sceneCodecCorrelation)"
@@ -257,11 +258,14 @@ class LiveOverlayWiringTest(unittest.TestCase):
     def test_independent_latch_fault_recovers_only_through_same_protection_renderer(self):
         latch = source("scene/SceneAsyncTextureLatch.kt")
         self.assertIn("throw Fault(error)", latch)
-        self.assertIn("failure?.invoke(Fault(error))", latch)
+        self.assertIn("val callback = synchronized(lock) { if (closed) null else failure }", latch)
+        self.assertIn("callback?.invoke(Fault(error))", latch)
+        self.assertIn("report = null; signal = null; failure = null", latch)
         for name in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
             actual = source("scene/" + name)
             self.assertIn("error is SceneAsyncTextureLatch.Fault && asyncInput != null && !asyncLatchDisabled", actual)
             self.assertIn("if (retryLatch) asyncLatchDisabled = true", actual)
+            self.assertIn("private var asyncLatchDisabled = !independentLatchEnabled", actual)
             self.assertIn("val independent = if (asyncLatchDisabled) null", actual)
             self.assertIn("SCENE_ASYNC_LATCH_RECOVERY sameProtection=true", actual)
         protected = source("scene/ProtectedDecoderSceneView.kt")

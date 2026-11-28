@@ -106,6 +106,20 @@ class Settings(context: Context) {
         clearSceneSurfaceExperiment = value
         prefs.edit().putBoolean("clearSceneSurfaceExperiment", value).apply()
     }
+    // The trial settings take effect on the next playback/scene construction.
+    // No persisted default change: compare the exact previous rendering route.
+    var decoderLowLatencyTrial by mutableStateOf(prefs.getBoolean("decoderLowLatencyTrial", false))
+        private set
+    fun updateDecoderLowLatencyTrial(value: Boolean) {
+        decoderLowLatencyTrial = value
+        prefs.edit().putBoolean("decoderLowLatencyTrial", value).apply()
+    }
+    var independentTextureLatch by mutableStateOf(prefs.getBoolean("independentTextureLatch", true))
+        private set
+    fun updateIndependentTextureLatch(value: Boolean) {
+        independentTextureLatch = value
+        prefs.edit().putBoolean("independentTextureLatch", value).apply()
+    }
     var mapDriverSelection by mutableStateOf(prefs.getBoolean("mapDriverSelection", true))
         private set
 

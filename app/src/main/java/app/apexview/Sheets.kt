@@ -500,6 +500,16 @@ fun SettingsScreen(app: AppState) {
                         "Secure Widevine output is unchanged.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+                SwitchRow("Composed HEVC low-latency decoder (A/B)",
+                    s.decoderLowLatencyTrial, s::updateDecoderLowLatencyTrial)
+                SwitchRow("Independent texture latch (A/B)",
+                    s.independentTextureLatch, s::updateIndependentTextureLatch)
+                Text(
+                    "Apply on the next playback. Low latency is tried only on supported clear hardware HEVC; " +
+                        "a rejected configuration retries the original codec. Disabling the independent latch " +
+                        "uses one EGL context with the same renderer and protection. Compare identical feeds and quality.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
                 SettingRow("Log status", DiagnosticLogs.status)
             }
         }

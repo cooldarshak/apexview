@@ -137,6 +137,7 @@ class FeedPlayer(
     /** Auto or a maximum requested video rendition shared by the viewer. */
     videoQuality: VideoQuality = VideoQuality.AUTO,
     preferFastStart: Boolean = false,
+    initialDecoderLowLatencyTrial: Boolean = false,
 ) {
     /** Authorized per-channel F1 offer used by the DASH segment-only capture path. */
     internal val sourceStream: PlayInfo = stream
@@ -158,7 +159,9 @@ class FeedPlayer(
     private val createdAt = android.os.SystemClock.elapsedRealtime()
     // Per-player controller. Never promotes a MULTIPLE-decoder source feed to
     // accelerated full-rate output or creates another decoder/DRM session.
-    private val outputCadence = AdaptivePlaybackCadenceObserver(context, sceneCodecCorrelation)
+    private val outputCadence = AdaptivePlaybackCadenceObserver(context, sceneCodecCorrelation).apply {
+        decoderLowLatencyTrial = initialDecoderLowLatencyTrial
+    }
     private val archivePower = context.applicationContext.getSystemService(android.os.PowerManager::class.java)
     // The active scene owns the display-rate decision. A previous renderer
     // disposed after a TextureView/SurfaceView handoff cannot revoke a newer

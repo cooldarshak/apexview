@@ -27,7 +27,8 @@ import androidx.media3.exoplayer.ExoPlayer
  * Protected buffers remain inside a protected EGL context and secure output SurfaceView.
  * No framebuffer readback, screenshot, decrypted samples or insecure output fallback exists.
  */
-internal class ProtectedDecoderSceneView(context: Context, private val protectedOutput: Boolean = true) : SurfaceView(context), SurfaceHolder.Callback {
+internal class ProtectedDecoderSceneView(context: Context, private val protectedOutput: Boolean = true,
+                                         independentLatchEnabled: Boolean = true) : SurfaceView(context), SurfaceHolder.Callback {
     // Prioritize video surface latching above archive composition and Compose
     // overlay work; this is one GL output thread, never another video decoder.
     private val thread = HandlerThread(
@@ -39,7 +40,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     private var asyncInput: SceneAsyncTextureLatch? = null
     // A proven runtime fault retires the optional shared-context path once.
     // Rebind through the existing renderer with the same DRM protection.
-    private var asyncLatchDisabled = false
+    private var asyncLatchDisabled = !independentLatchEnabled
     private var lastAsyncSubmitted = 0L
     private var ingressNotifications = 0L
     private var ingressCoalesced = 0L
@@ -391,6 +392,12 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         holder.removeCallback(this)
         detachOutput()
         codecCorrelation = null
+        scene = null
+        onDisplaySelected = {}
+        onFailure = {}
+        onFirstFrame = {}
+        onOutputLost = {}
+        onOutputSize = { _, _ -> }
         player = null; gl.removeCallbacks(glQueueProbe); thread.quitSafely()
     }
 
@@ -483,6 +490,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             Log.w("PitwallGraphics", "Independent latch API unavailable; retaining original renderer", error)
             null
         }
+        Log.i("PitwallGraphics", "SCENE_LATCH_POLICY independent=${independent != null} disabled=$asyncLatchDisabled vendorBytes=NOT_MEASURED")
         asyncInput = independent
         val frames = independent?.frames ?: SurfaceTexture(texture)
         decoderTexture = frames

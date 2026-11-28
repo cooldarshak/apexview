@@ -1373,7 +1373,8 @@ internal fun PlaybackVideoCanvas(
             // EGL and the nonsecure video output surface.
             androidx.compose.runtime.key(app.protectedRollingSceneActive, secureRolling, independentClearSurface) {
                 AndroidView(factory = { context ->
-                    ProtectedDecoderSceneView(context, protectedOutput = secureRolling).apply {
+                    ProtectedDecoderSceneView(context, protectedOutput = secureRolling,
+                        independentLatchEnabled = app.settings.independentTextureLatch).apply {
                         onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
                         onFailure = { error ->
                             if (independentClearSurface && !app.protectedRollingSceneActive) {
@@ -1393,7 +1394,8 @@ internal fun PlaybackVideoCanvas(
             }
         } else {
             // Capture-compatible TextureView, also the controlled A/B baseline.
-            AndroidView(factory = { context -> SingleDecoderSceneView(context).apply {
+            AndroidView(factory = { context -> SingleDecoderSceneView(context,
+                independentLatchEnabled = app.settings.independentTextureLatch).apply {
                 onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
                 onFailure = { reason ->
                     if (captureOverlay != null) bakedSession?.captureFailed(reason)

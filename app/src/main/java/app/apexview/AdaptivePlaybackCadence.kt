@@ -44,6 +44,7 @@ internal class AdaptivePlaybackCadenceObserver(
     private val power =
         context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
     @Volatile var composedSingle: Boolean = false
+    @Volatile var decoderLowLatencyTrial: Boolean = false
     // The scene provides its ACTUAL display ID. DEFAULT_DISPLAY can be wrong
     // for external monitors / TV handoffs. -1 means no attached output and
     // disables the unverified high-rate path, without hiding a playback error.

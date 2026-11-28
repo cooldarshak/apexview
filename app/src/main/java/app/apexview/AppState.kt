@@ -4497,6 +4497,7 @@ class AppState(
         videoQuality = settings.videoQualityForFeed(stream.profileLabel),
         startMs = startMs,
         preferFastStart = preferFastStart,
+        initialDecoderLowLatencyTrial = settings.decoderLowLatencyTrial,
     ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
 
     /**
@@ -7028,7 +7029,12 @@ class AppState(
         liveAtStart = null
         ProtectedHevcLiveComposition.clearAll()
         HevcFeedProfileCapture.clearTileTestSelection()
-        tiles.forEach { it.feed.release() }
+        // Invalidate the timing generation before potentially slow platform retirement.
+        timingWork.close()
+        timing = null
+        retirePlaybackOwners(tiles.map { it.feed }, { it.release() }) { error ->
+            android.util.Log.w("PitwallPlayback", "TERMINAL_FEED_RELEASE_FAILED type=${error.javaClass.simpleName}")
+        }
         tiles.clear()
         decoderMode = settings.decoderMode
         sessions.clear()
@@ -7043,9 +7049,9 @@ class AppState(
         arranging = false
         mutedAll = false
         playing = true
-        timing = null
-        timingWork.close()
-        try { radioPlayer?.release() } finally {
+        try { radioPlayer?.release() } catch (error: Exception) {
+            android.util.Log.w("PitwallPlayback", "TERMINAL_RADIO_RELEASE_FAILED type=${error.javaClass.simpleName}")
+        } finally {
             radioAllocator?.let { Media3MemoryOwners.unregister(it); it.trim() }
             radioAllocator = null
             radioPlayer = null
