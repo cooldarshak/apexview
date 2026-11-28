@@ -82,6 +82,27 @@ class PlaybackTimingWorkCoordinatorTest {
         assertEquals(listOf(720), committed)
     }
 
+    @Test fun replacingOfferWaitsForCancelledIoFinally() = runBlocking {
+        val work = PlaybackWorkCoordinator(this)
+        val started = CompletableDeferred<Unit>()
+        val drain = CompletableDeferred<Unit>()
+        val finished = CompletableDeferred<Unit>()
+        val replacement = CompletableDeferred<Unit>()
+        work.launchOffer(this) {
+            started.complete(Unit)
+            try { awaitCancellation() } finally {
+                withContext(NonCancellable) { drain.await(); finished.complete(Unit) }
+            }
+        }
+        started.await()
+        work.launchOffer(this) { error("superseded offer ran") }
+        work.launchOffer(this) { assertTrue(finished.isCompleted); replacement.complete(Unit) }
+        yield()
+        assertFalse(replacement.isCompleted)
+        drain.complete(Unit)
+        withTimeout(1500) { replacement.await() }
+    }
+
     @Test fun failedRetirementBlocksReplacementButRunsIndependentCleanup() = runBlocking {
         val work = PlaybackWorkCoordinator(this)
         val extra = CompletableDeferred<Unit>()

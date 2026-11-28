@@ -17,6 +17,11 @@ FIELDS = ("pssKiB", "platformGraphicsKiB", "media3InUseBytes",
           "sceneGraphicsOwners", "sceneUnverifiedRetirements",
           "media3ParkedInUseBytes", "nativeOwnedOutputAllocations",
           "nativeOwnedOutputReuses")
+CANDIDATE_TERMINAL_FIELDS = ("scenePendingRetirements", "sceneVirtualDisplays", "sceneImageReaders",
+    "sceneEncoderInputs", "sceneCaptureTextures", "sceneCaptureQueues", "sceneEglPbuffers",
+    "BAKED_QUEUEOwnedBytes", "RELAY_EXCLUSIVEOwnedBytes", "DASH_EXCLUSIVEOwnedBytes",
+    "CLEAR_SOURCEOwnedBytes", "PROTECTED_SOURCEOwnedBytes", "ARCHIVE_CACHEOwnedBytes",
+    "SHARED_FRAGMENTOwnedBytes", "media3FreePoolBytes")
 MATCH = ("device", "firmware", "content_id", "source_profile", "decoder_mode",
          "protection", "delivery", "feed_count", "overlay", "speed",
          "display_policy", "display_hz", "cache_state", "network_profile",
@@ -54,7 +59,8 @@ def artifact(root, item):
     return path
 
 
-def read_samples(path, pid):
+def read_samples(path, pid, candidate=False):
+    required = tuple(dict.fromkeys((*FIELDS, *(CANDIDATE_TERMINAL_FIELDS if candidate else ()))))
     rows = []
     with path.open(encoding="utf-8", errors="strict") as source:
         for line in source:
@@ -64,7 +70,7 @@ def read_samples(path, pid):
             if fields.get("pid") != str(pid):
                 continue
             try:
-                row = {key: int(fields[key]) for key in ("uptimeMs", *FIELDS)}
+                row = {key: int(fields[key]) for key in ("uptimeMs", *required)}
             except (KeyError, ValueError) as error:
                 raise ValueError("Mandatory memory counter unavailable") from error
             require(all(v >= 0 for v in row.values()), "Negative memory counter")
@@ -90,7 +96,7 @@ def window(rows, begin, end):
     return part
 
 
-def evaluate_run(run, root):
+def evaluate_run(run, root, candidate=False):
     require(SHA.fullmatch(str(run.get("commit", ""))) and
             DIGEST.fullmatch(str(run.get("apk_sha256", ""))), "Missing immutable build identity")
     require(type(run.get("pid")) is int and run["pid"] > 0, "Missing process ID")
@@ -114,7 +120,7 @@ def evaluate_run(run, root):
     # Separate evidence for actual output and functional checks, reviewed by owner.
     artifact(root, run["presentation_evidence"])
     require(run.get("quality_and_function_review") == "PASS", "Quality/function review not PASS")
-    rows = read_samples(log, run["pid"])
+    rows = read_samples(log, run["pid"], candidate)
     idle_begin, idle_end = run["idle_ms"]
     active_begin, active_end = run["active_ms"]
     stop = run["terminal_stop_ms"]
@@ -128,6 +134,8 @@ def evaluate_run(run, root):
               "nativeFragmentCapacityBytes")
     require(all(r["sceneUnverifiedRetirements"] == idle[0]["sceneUnverifiedRetirements"]
                 for r in active + after), "Unverified graphics retirement")
+    if candidate:
+        owners += CANDIDATE_TERMINAL_FIELDS
     require(all(r[key] == 0 for r in after for key in owners), "Terminal owner still retained")
     require(all(r["media3ParkedInUseBytes"] == 0 for r in active), "Parked media still allocated")
     def metric(key, divisor):
@@ -179,7 +187,7 @@ def evaluate(manifest, root):
             used_logs.add(digest)
         key = tuple(a["scenario"][k] for k in MATCH)
         group = groups.setdefault(key, [])
-        group.append((a, b, evaluate_run(a, root), evaluate_run(b, root)))
+        group.append((a, b, evaluate_run(a, root), evaluate_run(b, root, candidate=True)))
     reports = []
     for group in groups.values():
         require(len(group) >= 3, "At least three independent paired repetitions required")

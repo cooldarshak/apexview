@@ -2,7 +2,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
-from pitwall_memory_gate import evaluate, evaluate_run, FIELDS
+from pitwall_memory_gate import evaluate, evaluate_run, FIELDS, CANDIDATE_TERMINAL_FIELDS
 
 
 class MemoryGateTest(unittest.TestCase):
@@ -21,12 +21,14 @@ class MemoryGateTest(unittest.TestCase):
         (self.root / name).write_bytes(data)
         return {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
 
-    def run_data(self, index, candidate, pss=500, missing=False):
+    def run_data(self, index, candidate, pss=500, missing=False, retained=None):
         active_start, active_end, stop = 40000, 640000, 650000
         rows = []
         for tick in range(0, 810000, 10000):
             active = active_start <= tick <= active_end
-            f = dict.fromkeys(FIELDS, 0)
+            f = dict.fromkeys((*FIELDS, *(CANDIDATE_TERMINAL_FIELDS if candidate else ())), 0)
+            if retained and tick >= stop + 120000:
+                f[retained] = 1
             f.update(pssKiB=(pss if active else 100) * 1024,
                      platformGraphicsKiB=(200 if active else 10) * 1024,
                      media3InUseBytes=48*1024*1024 if active else 0,
@@ -94,3 +96,16 @@ class MemoryGateTest(unittest.TestCase):
         run["quality_and_function_review"]="PENDING"
         with self.assertRaisesRegex(ValueError,"review"):
             evaluate_run(run,self.root)
+
+    def test_candidate_retirement_checks_every_new_owner(self):
+        for field in CANDIDATE_TERMINAL_FIELDS:
+            with self.subTest(field=field):
+                run = self.run_data(0, True, retained=field)
+                with self.assertRaisesRegex(ValueError, "Terminal owner"):
+                    evaluate_run(run, self.root, candidate=True)
+
+    def test_old_baseline_cannot_masquerade_as_candidate(self):
+        run = self.run_data(0, False)
+        evaluate_run(run, self.root)
+        with self.assertRaisesRegex(ValueError, "counter unavailable"):
+            evaluate_run(run, self.root, candidate=True)
