@@ -47,7 +47,7 @@ internal class BakedCastLiveSession(
     @Synchronized fun health(): String {
         val publicationAgeMs = if (lastPublicationNs == 0L) -1L else
             (System.nanoTime() - lastPublicationNs).coerceAtLeast(0L) / 1_000_000L
-        return "publicationAgeMs=$publicationAgeMs segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=${pending.latestVideoUs} audioUs=${pending.latestAudioUs} queuedVideo=${pending.videoCount} queuedAudio=${pending.audioCount} queuedBytes=${pending.pendingBytes} publishingBytes=${pending.publishingBytes} bytesInFlight=${pending.bytesInFlight}"
+        return "publicationAgeMs=$publicationAgeMs segments=$published mediaUs=$publishedDurationUs windowUs=${hls.advertisedDurationUs} videoUs=${pending.latestVideoUs} audioUs=${pending.latestAudioUs} queuedVideo=${pending.videoCount} queuedAudio=${pending.audioCount} queuedBytes=${pending.pendingBytes} publishingBytes=${pending.publishingBytes} bytesInFlight=${pending.bytesInFlight} queuedMediaSpanUs=${pending.mediaSpanUs}"
     }
     var width = 0
         private set

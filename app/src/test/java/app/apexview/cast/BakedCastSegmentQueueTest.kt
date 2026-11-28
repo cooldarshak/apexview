@@ -81,6 +81,21 @@ class BakedCastSegmentQueueTest {
         queue.clear()
     }
 
+    @Test fun publisherOwnedTimeRemainsBoundedUntilAcknowledged() {
+        val queue = BakedCastSegmentQueue(maxRetainedUs = 2_000_000)
+        queue.offerVideo(picture(0, true))
+        queue.offerVideo(picture(1_000_000, true))
+        queue.offerAudio(listOf(sound(0), sound(1_000_000)))
+        val ready = requireNotNull(queue.takeReady())
+        assertTrue(runCatching { queue.offerVideo(picture(2_000_001, true)) }.isFailure)
+        assertTrue(runCatching { queue.offerAudio(listOf(sound(1_500_000), sound(2_000_001))) }.isFailure)
+        assertEquals(1, queue.audioCount)
+        assertEquals(1_000_000L, queue.mediaSpanUs)
+        queue.finish(ready)
+        queue.offerVideo(picture(2_000_001, true))
+        assertEquals(1_000_001L, queue.mediaSpanUs)
+    }
+
     @Test fun invalidBatchNeverPartiallyEnqueuesAudio() {
         val queue = BakedCastSegmentQueue(maxAudio = 4, maxBytes = 8)
         queue.offerAudio(listOf(sound(0)))

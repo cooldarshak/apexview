@@ -125,7 +125,7 @@ class LiveTimingFeed(
                     val timing = withContext(Dispatchers.Default) { snapshot() }
                     if (timing != null) {
                         onTiming(timing)
-                        onStatus(null)
+                        onStatus(if (timing.outline.size >= 8) null else "Live map: waiting for the circuit…")
                     } else if (streamStart != null) {
                         onStatus("Live map: waiting for the circuit…")
                     }
@@ -271,7 +271,7 @@ class LiveTimingFeed(
         }
     }
 
-    /** The session so far, or null until there's a track to draw it on. */
+    /** Publish timing once the session clock is known; map geometry may arrive later. */
     @Synchronized
     private fun snapshot(): SessionTiming? {
         val start = streamStart ?: return null
@@ -302,7 +302,7 @@ class LiveTimingFeed(
             // Turned to start at the finish line once lap crossings show where it is.
             val line = archive.findStartFinish(shape, states.crossings, built)
             SavedOutline(if (line != null) archive.startAt(shape, line) else shape, line != null)
-        } ?: return null
+        }
         val status = statusLines.toString()
         return SessionTiming(
             type = sessionType.ifEmpty { ref.title },
@@ -310,8 +310,8 @@ class LiveTimingFeed(
             drivers = archive.parseDrivers(driverList),
             tracks = built,
             states = states.states,
-            outline = outline.outline,
-            hasStartFinish = outline.hasStartFinish,
+            outline = outline?.outline ?: FloatArray(0),
+            hasStartFinish = outline?.hasStartFinish == true,
             corners = corners.orEmpty(),
             startUtcMs = start + HEAD_START_MS,
             circuitKey = ref.circuitKey,

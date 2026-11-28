@@ -4862,10 +4862,14 @@ class AppState(
     /** Puts a session's timing on screen; the first time, the map gets its place. */
     private fun showTiming(loaded: SessionTiming) {
         val first = timing == null
+        val mapBecameReady = timing?.outline?.size?.let { it < 8 } == true && loaded.outline.size >= 8
         if (!loaded.live && timingWork.speedsFor == loaded.radioBase) loaded.speeds = timingWork.archiveSpeeds
         timing = loaded
         if (towerOpen) loadSpeeds(loaded)
-        if (!first) return
+        if (!first) {
+            if (mapBecameReady && canvasW > 0f) placeMapIfNeeded(canvasW, canvasH)
+            return
+        }
         // A tower reservation is a direct layout constraint, even if the user previously
         // arranged feeds by hand. A map-only reservation retains its existing hand-layout rule.
         val reserveTvLayout = layoutMode == LayoutMode.TV && !laptopActive

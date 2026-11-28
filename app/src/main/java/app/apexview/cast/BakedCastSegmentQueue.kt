@@ -7,6 +7,7 @@ internal class BakedCastSegmentQueue(
     private val maxAudio: Int = 2048,
     private val maxBytes: Long = 48L * 1024 * 1024,
     private val nativeRequested: () -> Boolean = { false },
+    private val maxRetainedUs: Long = 15_000_000L,
 ) {
     data class Ready(val video: List<BakedCastTransportStream.Sample>,
                      val audio: List<BakedCastTransportStream.Sample>, val durationUs: Long) {
@@ -30,6 +31,26 @@ internal class BakedCastSegmentQueue(
     val videoCount get() = video.size
     val audioCount get() = audio.size
 
+    // Both pending and publisher-owned arrays count until the mux acknowledges retirement.
+    // A stalled publisher cannot accumulate arbitrarily old media even at low bitrates.
+    private fun retainedSpanUs(firstUs: Long = -1, lastUs: Long = -1): Long {
+        var low = Long.MAX_VALUE
+        var high = -1L
+        fun include(first: Long, last: Long) {
+            if (first >= 0) { low = minOf(low, first); high = maxOf(high, last) }
+        }
+        include(firstUs, lastUs)
+        video.firstOrNull()?.let { include(it.ptsUs, video.last().ptsUs) }
+        audio.firstOrNull()?.let { include(it.ptsUs, audio.last().ptsUs) }
+        publishing.keys.forEach { ready ->
+            ready.video.firstOrNull()?.let { include(it.ptsUs, ready.video.last().ptsUs) }
+            ready.audio.firstOrNull()?.let { include(it.ptsUs, ready.audio.last().ptsUs) }
+        }
+        return if (high < 0) 0 else high - low
+    }
+    val mediaSpanUs get() = retainedSpanUs()
+    init { require(maxRetainedUs > 0) }
+
     fun offerVideo(sample: BakedCastTransportStream.Sample) {
         require(sample.video && sample.ptsUs >= 0 && sample.ptsUs > latestVideoUs) {
             "The scene encoder did not produce monotonically increasing timestamps"
@@ -41,6 +62,9 @@ internal class BakedCastSegmentQueue(
         }
         require(video.size < maxVideo && sample.bytes.size.toLong() <= remainingBytes()) {
             "Baked Cast video publication backlog exhausted"
+        }
+        require(retainedSpanUs(sample.ptsUs, sample.ptsUs) <= maxRetainedUs) {
+            "Baked Cast media-time publication backlog exhausted"
         }
         latestVideoUs = sample.ptsUs
         video.addLast(sample)
@@ -85,6 +109,9 @@ internal class BakedCastSegmentQueue(
                 last = sample.ptsUs
             }
             total
+        }
+        require(retainedSpanUs(samples.first().ptsUs, samples.last().ptsUs) <= maxRetainedUs) {
+            "Baked Cast media-time publication backlog exhausted"
         }
         for (sample in samples) {
             audio.addLast(sample)
