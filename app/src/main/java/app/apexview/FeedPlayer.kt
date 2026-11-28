@@ -1254,7 +1254,8 @@ class FeedPlayer(
             if (archiveVodSession === session) {
                 archiveVodSession = previousArchive
                 archiveBufferSourceToken = previousBufferSourceToken
-                previousArchive?.let { archiveForwardBuffers.bindProduction(it.bufferProduction) }
+                if (previousArchive != null) archiveForwardBuffers.bindProduction(previousArchive.bufferProduction)
+                else archiveForwardBuffers.unbindProduction()
                 archiveSelectedAudioUri = previousAudio
                 archiveAudioChildren = previousAudioChildren
                 archiveCaptionChildren = previousCaptionChildren
@@ -1345,7 +1346,7 @@ class FeedPlayer(
     }
 
     internal fun releaseArchiveOwnership() {
-        archiveForwardBuffers.reset(false)
+        archiveForwardBuffers.unbindProduction()
         archiveBufferSourceToken = null
         archiveVodSession?.close(); archiveVodSession = null
         archiveSelectedAudioUri = null
@@ -1356,6 +1357,7 @@ class FeedPlayer(
         outputCadence.composedSingle = protectedLiveDashSource != null
     }
 
+    internal fun hintArchiveSeek(positionMs: Long) { archiveVodSession?.hintSeek(positionMs) }
     internal fun prioritizeArchiveSeek(positionMs: Long) { archiveVodSession?.prioritizeSeek(positionMs) }
     internal fun updateArchiveThermalStatus(status: Int) { archiveVodSession?.updateThermalStatus(status) }
 
@@ -1479,7 +1481,8 @@ class FeedPlayer(
 
     /** Restores this player's original feed and releases its bounded composed-media window. */
     fun stopProtectedComposedPlayback(positionMs: Long? = null, playWhenReady: Boolean = true, enableVideo: Boolean = initialVideoEnabled) {
-        archiveForwardBuffers.reset(false)
+        archiveForwardBuffers.unbindProduction()
+        archiveBufferSourceToken = null
         outputCadence.composedSingle = false
         val priorProtected = protectedLiveDashSource
         val priorArchive = archiveVodSession

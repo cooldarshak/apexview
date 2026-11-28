@@ -102,6 +102,19 @@ class ArchiveForwardBufferPolicyTest {
         policy.reset(false)
         assertNull(policy.target(2000, 1f))
     }
+    @Test fun retiredProductionWindowCannotQualifyAnotherSession() {
+        val policy = policy()
+        policy.reset(true)
+        observe(policy, ArchiveForwardBufferPolicy.Lane.VIDEO, 1)
+        observe(policy, ArchiveForwardBufferPolicy.Lane.AUDIO, 10)
+        assertNotNull(policy.target(2000, 1f))
+        policy.unbindProduction()
+        policy.reset(true)
+        observe(policy, ArchiveForwardBufferPolicy.Lane.VIDEO, 100)
+        observe(policy, ArchiveForwardBufferPolicy.Lane.AUDIO, 200)
+        assertNull(policy.target(2000, 1f))
+    }
+
     @Test fun cancelledAndInvalidLoadsCannotQualify() {
         val policy = policy()
         policy.reset(true)

@@ -59,7 +59,10 @@ internal class ArchiveMeasuredLoadControl(
         ).mediaItem.localConfiguration?.uri == HevcArchiveVodSession.MANIFEST_URI
         val rebufferRecently = parameters.lastRebufferRealtimeMs != C.TIME_UNSET &&
             now - parameters.lastRebufferRealtimeMs < 120_000
-        val target = if (archive && parameters.playWhenReady && !parameters.rebuffering &&
+        // Pausing or losing the local output must not silently replace an
+        // already measured forward horizon with the default 50-second target.
+        // No samples are discarded; rebuffer/retry/unknown lanes still fail open.
+        val target = if (archive && !parameters.rebuffering &&
             !rebufferRecently && parameters.targetLiveOffsetUs == C.TIME_UNSET)
             policy.target(now, parameters.playbackSpeed) else null
         if (target == null) {

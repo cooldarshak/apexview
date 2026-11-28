@@ -48,6 +48,12 @@ internal class ArchiveForwardBufferPolicy {
         production = window
         reset(false)
     }
+    /** Retire a session-owned production observer only on source ownership
+     * retirement, not when changing its captions or selected audio lane. */
+    @Synchronized fun unbindProduction() {
+        production = null
+        reset(false)
+    }
     @Synchronized fun select(enabled: Boolean, audioIndex: Int, captionIndex: Int) {
         if (eligible == enabled && audioChild == audioIndex && captionChild == captionIndex) return
         audioChild = audioIndex

@@ -341,7 +341,14 @@ internal class HevcArchiveVodSession(
 
     fun segmentAt(positionUs: Long): Int = ArchiveTimelineSearch.floorIndex(groups.size, positionUs) { groups[it].startUs }
 
-    /** Stop stale warm-ahead work as soon as a user seeks to a different fragment. */
+    /** A scrub preview is not a committed seek. Cancel/promote speculative
+     * work early but keep the current loader generation valid until commit. */
+    fun hintSeek(positionMs: Long) {
+        val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
+        preemptUnrelatedWarmup(target, seek = true)
+    }
+
+    /** Fence publication exactly once at the committed Media3 seek. */
     fun prioritizeSeek(positionMs: Long) {
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target

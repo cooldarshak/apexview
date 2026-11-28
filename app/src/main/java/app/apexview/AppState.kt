@@ -7564,7 +7564,7 @@ class AppState(
         // Cancel unrelated speculative clear archive work at the user's latest
         // scrub target, not after the 80ms coalescing delay. Media3 still seeks
         // only once to the exact final position.
-        if (singleDecoderSceneActive) singleDecoderScenePlayer?.prioritizeArchiveSeek(targetMs)
+        if (singleDecoderSceneActive) singleDecoderScenePlayer?.hintArchiveSeek(targetMs)
         playbackWork.coalesceSeek(scope, targetMs) { latest ->
             if (leaderTile() === owner) seekToNow(latest)
         }
@@ -7614,7 +7614,9 @@ class AppState(
         // stops at the live edge itself). Clamping to an unknown length sent skips back to 0.
         val duration = leader.feed.player.duration.takeIf { it > 0 } ?: durationMs.takeIf { it > 0 }
         val target = if (duration != null) targetMs.coerceIn(0L, duration) else targetMs.coerceAtLeast(0L)
-        if (singleDecoderSceneActive) protectedCompositionHost?.feed?.prioritizeArchiveSeek(target)
+        // Use the actual composed host (including layout/Cast handoff), not
+        // a stale selected tile. Only the committed seek advances its epoch.
+        if (singleDecoderSceneActive) singleDecoderScenePlayer?.prioritizeArchiveSeek(target)
         val shift = target - leader.feed.player.currentPosition
         // Every tile moves by the same amount, so their offsets from each other survive the seek.
         tiles.filter { nativeArchiveTiles.isEmpty() || it === protectedCompositionHost }.forEach { it.feed.seekFromControls((it.feed.player.currentPosition + shift).coerceAtLeast(0L)) }
