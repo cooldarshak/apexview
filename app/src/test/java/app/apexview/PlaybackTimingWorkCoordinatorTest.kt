@@ -82,6 +82,25 @@ class PlaybackTimingWorkCoordinatorTest {
         assertEquals(listOf(720), committed)
     }
 
+    @Test fun failedRetirementBlocksReplacementButRunsIndependentCleanup() = runBlocking {
+        val work = PlaybackWorkCoordinator(this)
+        val extra = CompletableDeferred<Unit>()
+        val blocked = CompletableDeferred<Unit>()
+        val nextReset = CompletableDeferred<Unit>()
+        val first = object : app.apexview.tiled.CmafCaptureLifecycle {
+            override fun reset() { error("vendor failed to retire") }
+        }
+        val second = object : app.apexview.tiled.CmafCaptureLifecycle {
+            override fun reset() { nextReset.complete(Unit) }
+        }
+        work.prepareCapture(first) { extra.complete(Unit) }
+        work.prepareCapture(second)
+        work.launchCapture(this, onRetirementFailure = { blocked.complete(Unit) }) {
+            error("replacement ran before verified retirement")
+        }
+        withTimeout(1500) { blocked.await(); extra.await(); nextReset.await() }
+    }
+
     @Test fun captureIsRetiredOnlyAfterItsOldWorkerStopsAndReplacementWaits() = runBlocking {
         val work = PlaybackWorkCoordinator(this)
         val firstStarted = CompletableDeferred<Unit>()

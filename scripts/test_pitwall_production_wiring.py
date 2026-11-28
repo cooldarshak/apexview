@@ -385,7 +385,9 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("rewritten.verifyHeader(outputSps, outputPps)", grid)
         self.assertIn("(!preserveOpaqueCabacTail && clearNalBytes == sourceLength)", rewriter)
         self.assertIn("cache.readLease(number)", delivery)
-        self.assertIn("session.segmentLease(number)", session)
+        self.assertIn("session.localSegmentLease(number, production)", session)
+        self.assertIn("delivery.obtainLease(number) { !closed && productionEpoch == epoch }", session)
+        self.assertIn("if (!current() || !foreground", delivery)
         self.assertIn("body.readInto(buffer, offset, cursor, count)", session)
         # Complete-delivery proof is evaluated while the exact read lease is
         # still pinned; cleanup must remain unconditional even if proof fails.
@@ -469,13 +471,13 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)", session)
         self.assertIn("NativeStitchingDeviceBudget.observePressure(headroom)", session)
         self.assertIn("if (NativeStitchingDeviceBudget.observePressure(currentMemory)) break", session)
-        self.assertIn("!closed && memoryWarmLimit > 0", session)
+        self.assertIn("!closed && requestEpoch == productionEpoch && memoryWarmLimit > 0", session)
         self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)", session)
         # An already scheduled second group must recheck the live local
         # demand, not just reuse the limit captured by the scheduling thread.
         worker = session.split("for (candidate in next)", 1)[1].split("private fun preemptUnrelatedWarmup", 1)[0]
         self.assertRegex(worker, r"val currentLimit = ArchiveBufferPolicy\.localWarmLimit\(warmLimit, nativeDemand,\s*android\.os\.SystemClock\.elapsedRealtime\(\), owners\.get\(\) == 1 && !baseReleased\.get\(\)\)")
-        self.assertIn("if (closed || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break", worker)
+        self.assertIn("if (closed || requestEpoch != productionEpoch || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break", worker)
         self.assertLess(worker.index("candidate - number > currentLimit"), worker.index("delivery.obtain(candidate, copyForCaller = false)"))
         self.assertRegex(session, r"if \(candidate - number > ArchiveBufferPolicy\.memoryWarmLimit\(warmLimit, currentMemory,\s*currentSizes\.input, currentSizes\.output\)\) break")
         policy = contents(prefix + "tiled/ArchiveBufferPolicy.kt")

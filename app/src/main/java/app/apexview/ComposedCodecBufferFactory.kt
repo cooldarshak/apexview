@@ -51,8 +51,11 @@ internal class ComposedCodecBufferFactory(
                     .firstOrNull { it.name == info.name }?.canonicalName
             }.getOrNull() ?: "UNREPORTED"
             val operatingRate = runCatching { configuration.mediaFormat.getFloat(MediaFormat.KEY_OPERATING_RATE) }.getOrNull()
+            val envelope = CodecEnvelopeAudit.classify(sps?.width ?: -1, sps?.height ?: -1,
+                configured(MediaFormat.KEY_MAX_WIDTH), configured(MediaFormat.KEY_MAX_HEIGHT))
             Log.i("PitwallGraphics", "CODEC_BUFFER_POLICY codec=${info.name} canonical=$canonical " +
-                "sdk=${Build.VERSION.SDK_INT} hardware=${info.hardwareAccelerated} secureCodec=${info.secure} " +
+                "sdk=${Build.VERSION.SDK_INT} device=${Build.DEVICE} model=${Build.MODEL.replace(' ', '_')} hardware=${info.hardwareAccelerated} secureCodec=${info.secure} " +
+                "adaptive=${info.adaptive} envelope=$envelope " +
                 "surface=${configuration.surface != null} operatingRate=${operatingRate ?: "UNREPORTED"} " +
                 "profile=${configured(MediaFormat.KEY_PROFILE)} level=${configured(MediaFormat.KEY_LEVEL)} " +
                 "format=${format.width}x${format.height} " +

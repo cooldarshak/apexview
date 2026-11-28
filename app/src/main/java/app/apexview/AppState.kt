@@ -3443,7 +3443,12 @@ class AppState(
         archiveCompositionStarting = true
         message = SINGLE_DECODER_ACTIVATING
         diagnostic()
-        playbackWork.launchCapture(scope) {
+        playbackWork.launchCapture(scope, onRetirementFailure = {
+            archiveCompositionStarting = false
+            singleDecoderFailure = "Previous composition resources could not be retired safely. Restart Pitwall before retrying single decoder."
+            message = singleDecoderFailure
+            android.util.Log.e("ApexviewSingleDecoder", "CAPTURE_RETIREMENT_UNVERIFIED replacementBlocked=true")
+        }) {
             try {
                 startup.start(
                     preflight = {
@@ -3809,7 +3814,12 @@ class AppState(
         archiveCompositionStarting = true
         diagnostics()
         message = SINGLE_DECODER_ACTIVATING
-        playbackWork.launchCapture(scope) {
+        playbackWork.launchCapture(scope, onRetirementFailure = {
+            archiveCompositionStarting = false
+            singleDecoderFailure = "Previous composition resources could not be retired safely. Restart Pitwall before retrying single decoder."
+            message = singleDecoderFailure
+            android.util.Log.e("ApexviewSingleDecoder", "CAPTURE_RETIREMENT_UNVERIFIED replacementBlocked=true")
+        }) {
             try {
                 startup.start(
                     preflight = {
@@ -4200,7 +4210,12 @@ class AppState(
         val audioTile = selectedTiles.firstOrNull { it !== host && it.audible }
         if (audioTile != null && host.audible) setAudio(audioTile)
 
-        playbackWork.launchCapture(scope) {
+        playbackWork.launchCapture(scope, onRetirementFailure = {
+            archiveCompositionStarting = false
+            singleDecoderFailure = "Previous composition resources could not be retired safely. Restart Pitwall before retrying single decoder."
+            message = singleDecoderFailure
+            android.util.Log.e("ApexviewSingleDecoder", "CAPTURE_RETIREMENT_UNVERIFIED replacementBlocked=true")
+        }) {
             var lastMessage: String? = null
             var composedPlaybackStarted = false
             var expandedVerifiedGeometry: Triple<Int, Int, Double>? = null

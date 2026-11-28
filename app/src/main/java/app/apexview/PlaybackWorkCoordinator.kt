@@ -17,15 +17,15 @@ internal class PlaybackWorkCoordinator(
 ) {
     private class Capture(
         val source: CmafCaptureLifecycle,
-        val previousCleanup: CompletableDeferred<Unit>?,
+        val previousCleanup: CompletableDeferred<Boolean>?,
         val afterDrain: () -> Unit,
     ) {
-        val cleanup = CompletableDeferred<Unit>()
+        val cleanup = CompletableDeferred<Boolean>()
         var job: Job? = null
     }
 
     private var currentCapture: Capture? = null
-    private var latestCleanup: CompletableDeferred<Unit>? = null
+    private var latestCleanup: CompletableDeferred<Boolean>? = null
     val captureJob: Job? get() = currentCapture?.job
     val capture: CmafCaptureLifecycle? get() = currentCapture?.source
     private var retryJob: Job? = null
@@ -39,18 +39,21 @@ internal class PlaybackWorkCoordinator(
 
     fun prepareCapture(source: CmafCaptureLifecycle, afterDrain: () -> Unit = {}) {
         cancelCapture()
-        currentCapture = Capture(source, latestCleanup?.takeUnless { it.isCompleted }, afterDrain).also {
+        currentCapture = Capture(source, latestCleanup, afterDrain).also {
             latestCleanup = it.cleanup
         }
     }
 
-    fun launchCapture(scope: CoroutineScope, work: suspend CoroutineScope.() -> Unit) {
+    fun launchCapture(scope: CoroutineScope, onRetirementFailure: () -> Unit = {},
+                      work: suspend CoroutineScope.() -> Unit) {
         val owner = checkNotNull(currentCapture)
         check(owner.job == null)
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                owner.previousCleanup?.await()
-                if (currentCapture === owner) work()
+                val retired = owner.previousCleanup?.await() != false
+                if (currentCapture === owner) {
+                    if (retired) work() else onRetirementFailure()
+                }
             } finally {
                 if (currentCapture === owner) currentCapture = null
             }
@@ -69,9 +72,14 @@ internal class PlaybackWorkCoordinator(
 
     private fun drain(owner: Capture) {
         cleanupScope.launch {
-            owner.previousCleanup?.await()
-            try { owner.source.reset() } finally { owner.afterDrain() }
-        }.invokeOnCompletion { owner.cleanup.complete(Unit) }
+            val prior = owner.previousCleanup?.await() != false
+            // Every independent release runs even when another fails. Keep
+            // failure sticky for this process owner; do not start another
+            // capture on a graph whose previous backing may still be leased.
+            val source = runCatching { owner.source.reset() }
+            val extra = runCatching { owner.afterDrain() }
+            owner.cleanup.complete(prior && source.isSuccess && extra.isSuccess)
+        }.invokeOnCompletion { owner.cleanup.complete(false) }
     }
 
     fun launchOffer(scope: CoroutineScope, work: suspend CoroutineScope.() -> Unit) {
