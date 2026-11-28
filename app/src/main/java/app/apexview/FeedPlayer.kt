@@ -154,15 +154,32 @@ class FeedPlayer(
     }
     internal fun attachDirectPresentation(view: androidx.media3.ui.PlayerView) {
         if (directPresentation.owns(view) || memoryOwnerRetired) return
-        directLifecycle.attach(view)
-        directPresentation.attach(view)
-        directView = view
+        try {
+            directPresentation.attach(view)
+            if (!directPresentation.owns(view)) return
+            directLifecycle.attach(view)
+            directView = view
+        } catch (error: Exception) {
+            // Keep the previous target only when transfer rollback succeeded.
+            // Otherwise terminal release retains both uncertain platform views.
+            val surviving = directPresentation.current
+            directView = surviving
+            runCatching {
+                if (surviving != null) directLifecycle.attach(surviving) else directLifecycle.close()
+            }
+            problem = "Video surface could not be attached safely"
+            Log.w("PitwallVideo", "DIRECT_SURFACE_ATTACH_FAILED feed=$diagnosticId type=${error.javaClass.simpleName}")
+        }
     }
     internal fun detachDirectPresentation(view: androidx.media3.ui.PlayerView) {
         if (!directPresentation.owns(view)) return
         directView = null
-        directLifecycle.close()
-        directPresentation.detach(view)
+        try {
+            try { directLifecycle.close() } finally { directPresentation.detach(view) }
+        } catch (error: Exception) {
+            problem = "Video surface could not be detached safely"
+            Log.w("PitwallVideo", "DIRECT_SURFACE_DETACH_FAILED feed=$diagnosticId type=${error.javaClass.simpleName}")
+        }
     }
     private fun checkDirectPresentation() {
         val view = directView ?: return

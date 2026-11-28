@@ -190,18 +190,29 @@ class PitwallReceiverActivity : ComponentActivity() {
         if (player !== current) return
         val owner = standardOwner ?: return
         if (owner.owns(view)) return
-        standardLifecycle.attach(view)
-        owner.attach(view)
-        standardView = view
-        setReceiverOutputDisplay(view, view.display?.displayId)
+        try {
+            owner.attach(view)
+            if (!owner.owns(view)) return
+            standardLifecycle.attach(view)
+            standardView = view
+            setReceiverOutputDisplay(view, view.display?.displayId)
+        } catch (error: Exception) {
+            // Fail on the current playback only; a delayed UI callback must
+            // never stop a replacement receiver session.
+            if (player === current) fail("TV direct video surface could not be attached safely")
+        }
     }
 
     private fun detachStandard(current: ExoPlayer, view: PlayerView) {
         if (player !== current || standardOwner?.owns(view) != true) return
         standardView = null
-        standardLifecycle.close()
-        setReceiverOutputDisplay(view, null)
-        standardOwner?.detach(view)
+        try {
+            try { standardLifecycle.close() } finally {
+                try { setReceiverOutputDisplay(view, null) } finally { standardOwner?.detach(view) }
+            }
+        } catch (error: Exception) {
+            if (player === current) fail("TV direct video surface could not be detached safely")
+        }
     }
 
     private fun checkStandardTarget() {
