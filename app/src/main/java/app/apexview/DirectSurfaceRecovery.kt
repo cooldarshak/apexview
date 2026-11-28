@@ -20,3 +20,15 @@ internal class DirectSurfaceRecovery {
         return Action.REBIND
     }
 }
+
+/** A SurfaceHolder may reuse the same Surface across generations. Destroying
+ * the producer invalidates acknowledgement even before Surface.isValid flips. */
+internal class DirectSurfaceEpoch {
+    private var startedAtMs: Long? = null
+    val available: Boolean get() = startedAtMs != null
+    fun created(nowMs: Long) { startedAtMs = nowMs }
+    fun destroyed() { startedAtMs = null }
+    fun rebind(nowMs: Long) { if (available) created(nowMs) }
+    fun accepts(sameSurface: Boolean, renderTimeMs: Long): Boolean =
+        sameSurface && startedAtMs?.let { renderTimeMs >= it } == true
+}

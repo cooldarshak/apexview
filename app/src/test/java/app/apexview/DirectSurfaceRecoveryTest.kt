@@ -4,6 +4,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DirectSurfaceRecoveryTest {
+    @Test fun destroyedOrReboundSurfaceRejectsOldRendererAcknowledgements() {
+        val epoch = DirectSurfaceEpoch()
+        assertFalse(epoch.accepts(true, 10))
+        epoch.created(100)
+        assertFalse(epoch.accepts(true, 99))
+        assertFalse(epoch.accepts(false, 101))
+        assertTrue(epoch.accepts(true, 101))
+        epoch.destroyed()
+        assertFalse(epoch.available)
+        assertFalse(epoch.accepts(true, 150))
+        epoch.rebind(151)
+        assertFalse(epoch.available)
+        epoch.created(200)
+        assertFalse(epoch.accepts(true, 150))
+        assertTrue(epoch.accepts(true, 201))
+        epoch.rebind(300)
+        assertFalse(epoch.accepts(true, 201))
+        assertTrue(epoch.accepts(true, 301))
+    }
     @Test fun oneRetryThenFailureOnlyForReadyVideo() {
         val r = DirectSurfaceRecovery()
         assertEquals(DirectSurfaceRecovery.Action.NONE, r.observe(0, false))

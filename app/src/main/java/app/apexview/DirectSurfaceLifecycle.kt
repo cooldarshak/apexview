@@ -11,31 +11,35 @@ import androidx.media3.ui.PlayerView
 internal class DirectSurfaceLifecycle {
     private var holder: SurfaceHolder? = null
     private var callback: SurfaceHolder.Callback? = null
-    var attachedAtMs = Long.MAX_VALUE
-        private set
-    val surface get() = holder?.surface?.takeIf { it.isValid }
+    private val epoch = DirectSurfaceEpoch()
+    val tracksSurface get() = holder != null
+    val surface get() = if (epoch.available) holder?.surface?.takeIf { it.isValid } else null
     val recovery = DirectSurfaceRecovery()
 
     fun attach(view: PlayerView) {
         close()
         val next = (view.videoSurfaceView as? SurfaceView)?.holder ?: return
         holder = next
-        reset()
+        if (next.surface.isValid) created() else destroyed()
         val listener = object : SurfaceHolder.Callback {
-            override fun surfaceCreated(h: SurfaceHolder) { if (holder === h && callback === this) reset() }
+            override fun surfaceCreated(h: SurfaceHolder) { if (holder === h && callback === this) created() }
             override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) = Unit
-            override fun surfaceDestroyed(h: SurfaceHolder) { if (holder === h && callback === this) reset() }
+            override fun surfaceDestroyed(h: SurfaceHolder) { if (holder === h && callback === this) destroyed() }
         }
         callback = listener
         next.addCallback(listener)
     }
-    fun reset() {
-        attachedAtMs = SystemClock.elapsedRealtime()
+    private fun created() {
+        epoch.created(SystemClock.elapsedRealtime())
         recovery.newTarget()
     }
-    fun rebindStarted() { attachedAtMs = SystemClock.elapsedRealtime() }
+    private fun destroyed() {
+        epoch.destroyed()
+        recovery.newTarget()
+    }
+    fun rebindStarted() { epoch.rebind(SystemClock.elapsedRealtime()) }
     fun acknowledge(output: Any, renderTimeMs: Long): Boolean {
-        if (surface !== output || renderTimeMs < attachedAtMs) return false
+        if (!epoch.accepts(surface === output, renderTimeMs)) return false
         recovery.acknowledge()
         return true
     }
@@ -43,8 +47,7 @@ internal class DirectSurfaceLifecycle {
         val old = holder
         val listener = callback
         holder = null; callback = null
-        attachedAtMs = Long.MAX_VALUE
-        recovery.newTarget()
+        destroyed()
         if (old != null && listener != null) old.removeCallback(listener)
     }
 }

@@ -904,7 +904,7 @@ class FeedPlayer(
                 output: Any,
                 renderTimeMs: Long,
             ) {
-                if (!outputCadence.composedSingle && directLifecycle.surface != null && directView != null &&
+                if (!outputCadence.composedSingle && directLifecycle.tracksSurface &&
                     !directLifecycle.acknowledge(output, renderTimeMs)) return
                 firstFrameRendered = true
                 fit.fastStart = false
