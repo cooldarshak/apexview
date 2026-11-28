@@ -233,7 +233,7 @@ class ArchitectureGBAndroidTest {
             .setBufferDurationsMs(androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
                 androidx.media3.exoplayer.DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1000, 2000)
             .build()
-        val control = app.apexview.ArchiveMeasuredLoadControl(original, policy)
+        val control = app.apexview.ArchiveMeasuredLoadControl(original, policy) { allocator.totalBytesAllocated.toLong() }
         val factory = ledger.factory(
             androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context),
             app.apexview.Media3SourceAllocationLedger.Kind.SOURCE_MIXED)

@@ -5125,3 +5125,10 @@ Checkpoint only; all ten workstreams remain one batch. No CI until remaining unc
 - M57 bounded two-request capacity history: ideal immediately retired model 80/107 → 88/107, equal peak 9961472 bytes; real reuse still limited by pins and admission. Reset history at pressure trim.
 - M58/M60 reset cadence health on refresh/speed transitions, exclude mixed five-second windows. Do not force display modes or accelerated output.
 - M51/M52 vendor queue/graphics attribution and physical acceptance remain open. No speculative codec knobs or resolution changes.
+
+
+### M51–M60 checkpoint 3
+- M58/M60 reject mixed observation windows by correlation owner and revision; stale callbacks cannot restore a healthy accelerated trial after a mode or speed reset.
+- M59 legacy capture scripts stage named configurations and preserve CLI diagnostics. Two-command v2 scripts separately supplied. On-device Perfetto coverage not yet verified.
+- M51/M52 evidence analyzer groups actual nonblocking queue refusals, app graphics-owner lifetime and platform memory; these are not physical queue bytes or frame loss. No vendor codec parameter changes without physical proof.
+- Corrected instrumentation constructor for M53. Android/Rust compiler and physical target validation remain required.

@@ -22,7 +22,7 @@ start)
   if ! grep -q 'android.heapprofd' "$dest/$base-producers.txt"; then
     echo "Native heap profiling producer unavailable; share the producer report"; exit 1
   fi
-  perfetto --background-wait --txt -c - -o "$trace" <<'PITWALL_CONFIG'
+  cat > "$dest/$base.cfg" <<'PITWALL_CONFIG'
 # 90-second pre-playback native allocation-site + graphics ownership capture.
 # Keep separate from the higher-overhead full scheduler trace. Android may
 # refuse heapprofd or GPU counters: missing producers are NOT zero usage.
@@ -72,6 +72,9 @@ write_into_file: true
 file_write_period_ms: 5000
 max_file_size_bytes: 134217728
 PITWALL_CONFIG
+  cfg="/data/misc/perfetto-configs/$base.cfg"
+  [ -s "$dest/$base.cfg" ] && cp "$dest/$base.cfg" "$cfg" && cmp -s "$dest/$base.cfg" "$cfg" || { echo 'Config staging failed'; exit 1; }
+  perfetto --background-wait --txt -c "$cfg" -o "$trace" </dev/null > "$dest/$base-perfetto.txt" 2>&1 || { cat "$dest/$base-perfetto.txt"; exit 1; }
   echo "Capture started. Return to Pitwall, start the same replay now, and keep playing."
   echo "After 90 seconds run this script with collect $engine."
   ;;
@@ -81,6 +84,7 @@ collect)
   dumpsys meminfo "$pkg" >> "$dest/$base-ownership.txt"
   dumpsys SurfaceFlinger --list | grep -F "$pkg" >> "$dest/$base-ownership.txt" || true
   cp "$trace" "$dest/$base.perfetto-trace"
+  rm -f "/data/misc/perfetto-configs/$base.cfg"
   ls -l "$dest/$base.perfetto-trace"
   echo "Share the trace, ownership and producer text files plus the in-app diagnostic log."
   ;;

@@ -95,7 +95,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
                 logDisplayMode("mode-changed")
                 val changedHz = kotlin.math.abs(selectedDisplayHz - previousHz) >= 0.5f
                 if (changedHz) {
-                    mixedPipelineWindow = true
                     codecCorrelation?.resetPipelineHealth(attachedCodecSurface)
                 }
                 gl.post { if (!released) { if (changedHz) cadenceGate.reset(); applyOutputFrameRateHint() } }
@@ -427,7 +426,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
     @Volatile private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
-    @Volatile private var mixedPipelineWindow = true
+    private var lastPipelineWindowRevision = -1L
     private fun pipelineHealthy(): Boolean =
         codecCorrelation?.allowsAcceleratedOutput(System.nanoTime()) == true
     @Volatile private var codecCorrelation: SceneCodecTimestampCorrelation? = null
@@ -532,7 +531,6 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         val speedChanged = playbackSpeed != normalizedSpeed
         if (speedChanged) {
-            mixedPipelineWindow = true
             codecCorrelation?.resetPipelineHealth(attachedCodecSurface)
         }
         playbackSpeed = normalizedSpeed
@@ -905,10 +903,12 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
             val expectedFps = SceneFrameRatePolicy.composedOutputHint(
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
-            if (!reducedPreviewInWindow && !mixedPipelineWindow) codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
-            else if (reducedPreviewInWindow) Log.i("ApexviewSingleDecoder", "SCENE_LOCAL_PREVIEW_SUPPRESSED receiver=BAKED_CAST localVideoFps=0")
+            val windowRevision = codecCorrelation?.pipelineWindowRevision(input) ?: -1L
+            if (windowRevision >= 0L && windowRevision == lastPipelineWindowRevision && !reducedPreviewInWindow)
+                codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics, windowRevision)
+            lastPipelineWindowRevision = windowRevision
+            if (reducedPreviewInWindow) Log.i("ApexviewSingleDecoder", "SCENE_LOCAL_PREVIEW_SUPPRESSED receiver=BAKED_CAST localVideoFps=0")
             reducedPreviewInWindow = false
-            mixedPipelineWindow = false
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallTextureSceneLatched5s",
@@ -1042,7 +1042,7 @@ internal class SingleDecoderSceneView(context: Context) : TextureView(context), 
         frameDemand.reset()
         cadenceGate.reset()
         lastLogNs = 0L
-        mixedPipelineWindow = true
+        lastPipelineWindowRevision = -1L
         val endedCapture = castSession
         steps.run("baked-cast") { stopBakedCastOnGl() }
         steps.run("capture-notification") { endedCapture?.captureFailed("The viewer video output was replaced") }

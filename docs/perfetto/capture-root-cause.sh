@@ -32,7 +32,14 @@ begin() {
   out="$traceDir/pitwall-$label-$name.perfetto-trace"
   [ ! -e "$out" ] || { echo "Trace exists: $out. Use a fresh run label."; exit 1; }
   mark "$name-start"
-  if perfetto --background-wait --txt -c - -o "$out" > "$dir/$name-perfetto.txt" 2>&1; then
+  # Stage a named, nonempty config before the CLI invocation (aShell stdin
+  # capture was not reliable). Keep the original in the evidence bundle.
+  cat > "$dir/$name.cfg"
+  cfg="/data/misc/perfetto-configs/pitwall-$label-$name.cfg"
+  [ -s "$dir/$name.cfg" ] && cp "$dir/$name.cfg" "$cfg" && cmp -s "$dir/$name.cfg" "$cfg" || {
+    echo "$name CONFIG_STAGE_FAILED" >> "$manifest"; exit 1;
+  }
+  if perfetto --background-wait --txt -c "$cfg" -o "$out" </dev/null > "$dir/$name-perfetto.txt" 2>&1; then
     echo "$(( $(uptime) + seconds + 5 ))" > "$dir/$name-end"
     echo "$name capture accepted; return to the app now. Wait at least $((seconds + 5)) seconds."
   else
@@ -46,6 +53,7 @@ finish_trace() {
   [ -f "$dir/$name-end" ] || { echo "No $name capture started."; exit 1; }
   [ "$(uptime)" -ge "$(cat "$dir/$name-end")" ] || { echo "$name capture still running."; exit 1; }
   src="$traceDir/pitwall-$label-$name.perfetto-trace"
+  rm -f "/data/misc/perfetto-configs/pitwall-$label-$name.cfg"
   if [ -s "$src" ]; then
     cp "$src" "$dir/$name.perfetto-trace"
     mark "$name-copied"
