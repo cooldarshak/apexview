@@ -612,6 +612,7 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         onOutputLost()
+        SceneGraphicsOwners.process.beginRetirement(graphicsOwnerId)
         detachDecoderInput("output-destroyed")
         // GL owns the Surface reference until queued destruction releases it. Clearing it
         // here lost that reference before destroy() and leaked a codec output surface.
@@ -619,6 +620,8 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
             // TextureView returns false: the app owns SurfaceTexture release
             // even when the GL loop has already quit on a late lifecycle event.
             surface.release()
+            if (SceneGraphicsOwners.process.snapshot().containsKey(graphicsOwnerId))
+                SceneGraphicsOwners.process.retirementFailure()
             Log.w("ApexviewSingleDecoder", "SCENE_OUTPUT_RELEASE_AFTER_GL_THREAD_EXIT")
         }
         return false
@@ -631,6 +634,7 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         surfaceLifetime.advance()
         outputReadiness.invalidate()
         main.removeCallbacks(glQueueProbe)
+        SceneGraphicsOwners.process.beginRetirement(graphicsOwnerId)
         detachDecoderInput("scene-released")
         player = null
         surfaceTextureListener = null
@@ -646,6 +650,8 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         // transfers that particular texture to our queued release.
         if (!gl.post { try { destroy() } finally { thread.quitSafely() } }) {
             thread.quitSafely()
+            if (SceneGraphicsOwners.process.snapshot().containsKey(graphicsOwnerId))
+                SceneGraphicsOwners.process.retirementFailure()
             Log.w("ApexviewSingleDecoder", "SCENE_GL_RELEASE_QUEUE_CLOSED")
         }
     }

@@ -77,7 +77,12 @@ internal class BakedCastCaptureWorker(
     fun stop() {
         if (stopped) return
         stopped = true
-        gl.post { cleanup() }
+        SceneGraphicsOwners.process.beginRetirement(graphicsOwnerId)
+        if (!gl.post { cleanup() }) {
+            if (SceneGraphicsOwners.process.snapshot().containsKey(graphicsOwnerId))
+                SceneGraphicsOwners.process.retirementFailure()
+            Log.w("PitwallCast", "BAKED_CAST_WORKER_RELEASE_QUEUE_CLOSED")
+        }
     }
 
     private fun initialize() {

@@ -378,8 +378,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         // on its application thread, then queue GL destruction. Waiting for a
         // 2-second CountDownLatch here froze Compose/TV controls on rotation,
         // stop/start and Cast receiver handoff while eglSwapBuffers was busy.
+        SceneGraphicsOwners.process.beginRetirement(graphicsOwnerId)
         detachDecoderInput("output-detached")
         if (!gl.post { destroy() }) {
+            if (SceneGraphicsOwners.process.snapshot().containsKey(graphicsOwnerId))
+                SceneGraphicsOwners.process.retirementFailure()
             Log.w("ApexviewSingleDecoder", "SECURE_EGL_RELEASE_QUEUE_CLOSED")
         }
     }
