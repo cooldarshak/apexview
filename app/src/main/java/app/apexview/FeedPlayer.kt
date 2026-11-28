@@ -146,6 +146,13 @@ class FeedPlayer(
         private set
 
     val player: ExoPlayer
+    private val directPresentation by lazy(LazyThreadSafetyMode.NONE) {
+        DirectPresentationOwner<androidx.media3.ui.PlayerView> { old, next ->
+            androidx.media3.ui.PlayerView.switchTargetView(player, old, next)
+        }
+    }
+    internal fun attachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.attach(view)
+    internal fun detachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.detach(view)
     /** Codec PTS correlation for the real clear/protected scene; no SF assertion. */
     internal val sceneCodecCorrelation = SceneCodecTimestampCorrelation()
     /** Updated to the security level Widevine actually opened, not just the requested setting. */
@@ -1696,7 +1703,7 @@ class FeedPlayer(
         // rapid seeks / transitions. The finally chain still closes every
         // owned source even if a platform player release fails.
         try {
-            player.release()
+            try { directPresentation.close() } finally { player.release() }
         } finally {
             try {
                 Media3MemoryOwners.unregister(playbackAllocator)

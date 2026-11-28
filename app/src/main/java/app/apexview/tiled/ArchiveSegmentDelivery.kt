@@ -38,24 +38,36 @@ internal class ArchiveSegmentDelivery(
     fun obtain(number: Int, copyForCaller: Boolean): ByteArray? =
         if (copyForCaller) obtainInternal(number, true, ::readCopy)
         else {
-            obtainInternal(number, false) { if (contains(it)) Unit else null }
+            obtainInternal(number, false, { if (contains(it)) Unit else null })
             null
         }
 
-    fun obtainLease(number: Int): ArchiveFragmentLease =
-        obtainInternal(number, true, ::readLease)
+    fun obtainLease(number: Int, current: () -> Boolean = { true }): ArchiveFragmentLease =
+        obtainInternal(number, true, ::readLease, current) { it.close() }
 
-    private fun <T : Any> obtainInternal(number: Int, foreground: Boolean, acquire: (Int) -> T?): T {
+    private fun <T : Any> obtainInternal(number: Int, foreground: Boolean, acquire: (Int) -> T?,
+                                          current: () -> Boolean = { true }, discard: (T) -> Unit = {}): T {
+        fun checkCurrent() { if (!current()) throw ArchiveWarmupCancelledException() }
+        fun acquireCurrent(): T? {
+            checkCurrent()
+            val result = acquire(number) ?: return null
+            if (!current()) {
+                discard(result)
+                throw ArchiveWarmupCancelledException()
+            }
+            return result
+        }
         var evictionRetries = 0
         var cancelledRecoveries = 0
         while (true) {
-            acquire(number)?.let { return it }
+            acquireCurrent()?.let { return it }
             try {
                 production.run(number) {
+                    checkCurrent()
                     if (!contains(number)) composeAndPublish(number)
                 }
             } catch (cancelled: ArchiveWarmupCancelledException) {
-                if (!foreground || Thread.currentThread().isInterrupted ||
+                if (!current() || !foreground || Thread.currentThread().isInterrupted ||
                     ++cancelledRecoveries > MAX_CANCELLED_PREFETCH_RECOVERIES) throw cancelled
                 onCancelledWarmupRecovery(number)
                 continue
@@ -63,7 +75,7 @@ internal class ArchiveSegmentDelivery(
 
             // Atomically acquire ownership after publication. An eviction may
             // race with production, but can never zero a successfully leased read.
-            acquire(number)?.let { return it }
+            acquireCurrent()?.let { return it }
             if (evictionRetries >= MAX_EVICTION_RETRIES) {
                 throw ArchiveVodMediaException(
                     "Archive segment $number repeatedly evicted during delivery",

@@ -1532,10 +1532,10 @@ private fun TileView(
                     }
                 },
                 update = {
-                    it.player = tile.feed.player
+                    tile.feed.attachDirectPresentation(it)
                     it.subtitleView?.applyCaptionAppearance(app.settings.captionAppearance)
                 },
-                onRelease = { it.player = null },
+                onRelease = { tile.feed.detachDirectPresentation(it) },
                 modifier = Modifier.fillMaxSize(),
             )
         }

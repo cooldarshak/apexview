@@ -227,7 +227,7 @@ internal class HevcArchiveVodSession(
     // Guarded by cacheLock. Shared relay ownership and seeks invalidate local delivery proof.
     private var localDeliveryEpoch = 0L
     // Separate production generation: relay lease changes do not invalidate valid media.
-    private var productionEpoch = 0L
+    @Volatile private var productionEpoch = 0L
     private fun captureLocalDeliveryEpoch(): Long? = synchronized(cacheLock) {
         if (!closed && owners.get() == 1 && !baseReleased.get()) localDeliveryEpoch else null
     }
@@ -350,6 +350,7 @@ internal class HevcArchiveVodSession(
 
     /** Fence publication exactly once at the committed Media3 seek. */
     fun prioritizeSeek(positionMs: Long) {
+        val started = System.nanoTime()
         val target = segmentAt(ArchiveTimelineSearch.msToUs(positionMs))
         nativeDemand = null // never use the pre-seek clock for the new target
         bufferProduction.reset()
@@ -362,6 +363,7 @@ internal class HevcArchiveVodSession(
             }
         }
         preemptUnrelatedWarmup(target, seek = true)
+        android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_SEEK_COMMIT epoch=$productionEpoch targetMs=$positionMs segment=$target indexAndFenceMs=${(System.nanoTime() - started) / 1_000_000L}")
     }
 
     // Cast/HTTP callers keep their existing independent mutable payload contract.
@@ -371,13 +373,23 @@ internal class HevcArchiveVodSession(
     internal fun segmentLease(number: Int): ArchiveFragmentLease =
         requestSegment(number, { delivery.obtainLease(number) }, { it.close() })
 
-    private fun <T> requestSegment(number: Int, acquire: () -> T, discard: (T) -> Unit): T {
+    // Only the local Media3 loader is seek-fenced. Independent Cast HTTP readers
+    // keep their immutable segment contract even if the local clock changes.
+    private fun localSegmentLease(number: Int, epoch: Long): ArchiveFragmentLease =
+        requestSegment(number, { delivery.obtainLease(number) { !closed && productionEpoch == epoch } },
+            { it.close() }, epoch)
+
+    private fun <T> requestSegment(number: Int, acquire: () -> T, discard: (T) -> Unit,
+                                   localEpoch: Long? = null): T {
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
+        if (localEpoch != null && localEpoch != productionEpoch) throw ArchiveWarmupCancelledException()
         preemptUnrelatedWarmup(number)
+        val requestEpoch = productionEpoch
         val started = System.nanoTime()
         val wasCached = synchronized(cacheLock) { cache.contains(number) }
         val resource = acquire()
         try {
+        if (localEpoch != null && localEpoch != productionEpoch) throw ArchiveWarmupCancelledException()
         val waitMs = (System.nanoTime() - started) / 1_000_000L
         // Record every foreground request. Only logging misses/slow hits biases the
         // sample and makes a real p95 impossible to calculate from exported logs.
@@ -397,14 +409,14 @@ internal class HevcArchiveVodSession(
             android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get())
         val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)
         synchronized(warmLock) {
-            if (!closed && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
+            if (!closed && requestEpoch == productionEpoch && memoryWarmLimit > 0 && number < groups.lastIndex && (warmTask == null || warmTask!!.isDone)) {
                 val next = ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)
                 warmer.purge()
                 warmTask = warmer.submit {
                     for (candidate in next) {
                         val currentLimit = ArchiveBufferPolicy.localWarmLimit(warmLimit, nativeDemand,
                             android.os.SystemClock.elapsedRealtime(), owners.get() == 1 && !baseReleased.get())
-                        if (closed || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break
+                        if (closed || requestEpoch != productionEpoch || Thread.currentThread().isInterrupted || candidate - number > currentLimit) break
                         val currentMemory = nativeBudgetContext?.let { context ->
                             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
                         }
@@ -452,6 +464,7 @@ internal class HevcArchiveVodSession(
                 }
             }
         }
+            if (localEpoch != null && localEpoch != productionEpoch) throw ArchiveWarmupCancelledException()
             return resource
         } catch (failure: Throwable) {
             discard(resource)
@@ -1016,7 +1029,8 @@ internal class HevcArchiveVodSession(
                     val number = name?.let { Regex("s-(\\d+)\\.m4s").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
                         ?: throw IOException("Unknown archive resource")
                     val epoch = session.captureLocalDeliveryEpoch()
-                    session.segmentLease(number).also {
+                    val production = session.productionEpoch
+                    session.localSegmentLease(number, production).also {
                         deliveryNumber = number
                         deliveryEpoch = epoch
                     }

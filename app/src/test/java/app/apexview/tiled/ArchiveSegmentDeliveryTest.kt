@@ -181,6 +181,31 @@ class ArchiveSegmentDeliveryTest {
             ArchiveWarmupFailurePolicy.classify(IOException("closed"), true, false))
     }
 
+    @Test fun supersededSeekCannotRetryOrBorrowStaleLease() {
+        val cache = BoundedArchiveFragmentCache(maxEntries = 3, maxBytes = 64)
+        var generation = 1
+        var calls = 0
+        val delivery = ArchiveSegmentDelivery(cache, Any(), ArchiveSegmentSingleFlight(), {},
+            { key ->
+                calls++
+                generation++
+                if (key == 1) throw ArchiveWarmupCancelledException()
+                cache.put(key, ByteArray(8) { 7 })
+            })
+        assertThrows(ArchiveWarmupCancelledException::class.java) {
+            delivery.obtainLease(1) { generation == 1 }
+        }
+        assertEquals(1, calls)
+        assertThrows(ArchiveWarmupCancelledException::class.java) {
+            delivery.obtainLease(2) { generation == 2 }
+        }
+        assertEquals(2, calls)
+        // New generation can reuse valid immutable cached bytes.
+        val lease = delivery.obtainLease(2) { generation == 3 }
+        try { assertEquals(8, lease.size) } finally { lease.close(); cache.clear() }
+        assertEquals(2, calls)
+    }
+
     @Test fun mediaLoaderLeaseUsesSharedPublicationAndSurvivesReplacement() {
         val cache = BoundedArchiveFragmentCache(maxEntries = 1, maxBytes = 64)
         val owned = ByteArray(12) { 7 }
