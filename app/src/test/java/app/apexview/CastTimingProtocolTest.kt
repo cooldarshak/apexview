@@ -277,6 +277,42 @@ class CastTimingProtocolTest {
         assertSame(previousFrame, receiver.frame)
     }
 
+    @Test fun geometryReplacementRetainsTowerUntilNewFrameAndSeekInvalidatesBoth() {
+        val receiver = CastTimingReceiver { 1000L }
+        val geo = CastTimingProtocol.geometry(timing()).put("playbackId", "current")
+        val id = geo.getString("id")
+        val first = frame(id).put("playbackId", "current").put("tableId", 1L)
+            .put("sequence", 1L).put("clockEpoch", 0L)
+        receiver.accept(geo, "current")
+        receiver.accept(JSONObject().put("kind", "table").put("version", 1)
+            .put("playbackId", "current").put("id", 1L).put("clockEpoch", 0L)
+            .put("rows", first.getJSONArray("rows")), "current")
+        receiver.accept(first, "current")
+        val lastTower = receiver.towerFrame
+        assertNotNull(lastTower)
+        val replacement = JSONObject(geo.toString()).put("id", "new-outline")
+        receiver.accept(replacement, "current")
+        assertNull(receiver.frame)
+        assertSame(lastTower, receiver.towerFrame)
+        assertEquals(id, receiver.towerGeometry!!.id)
+        receiver.accept(JSONObject(first.toString()).put("sequence", 2L), "current")
+        assertNull(receiver.frame)
+        assertSame(lastTower, receiver.towerFrame)
+        receiver.accept(JSONObject(first.toString()).put("geometry", "new-outline")
+            .put("sequence", 3L), "current")
+        assertEquals("new-outline", receiver.frame!!.geometryId)
+        assertEquals("new-outline", receiver.towerGeometry!!.id)
+        receiver.onSeek(5000L, 25000L)
+        assertNull(receiver.frame)
+        assertNull(receiver.towerFrame)
+        assertNull(receiver.towerGeometry)
+        receiver.accept(JSONObject(first.toString()).put("geometry", "new-outline")
+            .put("sequence", 4L), "current")
+        assertNull(receiver.towerFrame)
+        receiver.clear()
+        assertNull(receiver.towerGeometry)
+    }
+
     @Test fun pendingNextTableDoesNotFreezeIndependentCarMotion() {
         val state = CastTimingReceiver()
         val geometry = CastTimingProtocol.geometry(timing()).put("playbackId", "current")

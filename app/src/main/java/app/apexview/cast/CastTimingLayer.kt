@@ -35,9 +35,11 @@ internal fun CastTimingLayer(state: CastTimingReceiver, canvasWidth: Float, canv
         derivedStateOf(structuralEqualityPolicy()) {
             val frame = state.frame
             val geometry = state.geometry
-            if (frame == null || geometry == null || frame.geometryId != geometry.id) return@derivedStateOf 0 to 0
-            val rows = if (frame.tower != null) (state.currentTable ?: frame.table).rows.size else 0
+            val tower = state.towerFrame
+            val rows = if (tower?.tower != null && state.towerGeometry != null)
+                (state.currentTable ?: tower.table).rows.size else 0
             val cars = when {
+                frame == null || geometry == null || frame.geometryId != geometry.id -> 0
                 frame.mapMode == MapMode.OFF -> 0
                 frame.mapMode.inWindow && frame.map == null -> 0
                 frame.mapMode == MapMode.PIT -> frame.circle?.ring?.size ?: 0
@@ -74,7 +76,7 @@ private data class TowerFrame(
 private fun ReceiverTower(state: CastTimingReceiver, scale: Float, onDriver: (String, Boolean) -> Unit) {
     val tower by remember(state) {
         derivedStateOf(structuralEqualityPolicy()) {
-            val f = state.frame ?: return@derivedStateOf null
+            val f = state.towerFrame ?: return@derivedStateOf null
             val p = f.tower ?: return@derivedStateOf null
             val updatedTable = state.currentTable ?: f.table
             TowerFrame(p, f.geometryId, updatedTable, f.header, f.density, f.fontScale, f.towerFontScale, f.towerOpacity,
@@ -82,7 +84,7 @@ private fun ReceiverTower(state: CastTimingReceiver, scale: Float, onDriver: (St
         }
     }
     val f = tower ?: return
-    val timing = state.geometry?.takeIf { it.id == f.geometryId }?.timing ?: return
+    val timing = state.towerGeometry?.takeIf { it.id == f.geometryId }?.timing ?: return
     val density = Density(f.density * scale, f.fontScale * f.towerFontScale)
     CompositionLocalProvider(LocalDensity provides density) {
         Box(Modifier.offset { IntOffset((f.panel.x * scale).roundToInt(), (f.panel.y * scale).roundToInt()) }

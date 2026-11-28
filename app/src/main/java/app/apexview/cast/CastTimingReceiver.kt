@@ -14,6 +14,12 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
         private set
     var frame by mutableStateOf<CastTimingProtocol.Frame?>(null)
         private set
+    // A circuit-outline replacement is not a tower reset. Keep only one
+    // last validated tower layout and driver-metadata snapshot per playback.
+    var towerFrame by mutableStateOf<CastTimingProtocol.Frame?>(null)
+        private set
+    var towerGeometry by mutableStateOf<CastTimingProtocol.Geometry?>(null)
+        private set
     private val assembler = TimingMessageChunks.Assembler(nowMs)
     private var tableId = -1L
     private var epochAwareTables = false
@@ -44,6 +50,7 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
         mutationGeneration++
         geometry = null
         frame = null
+        towerFrame = null; towerGeometry = null
         tableId = -1
         epochAwareTables = false
         tableEpoch = null
@@ -93,6 +100,9 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
         clockEpoch++
         pendingLegacySeek = fromMs to toMs
         frame = null
+        towerFrame = null; towerGeometry = null
+        lastFrameReceivedMs = -1L
+        assembler.clear()
         // Older peers never sent a table epoch. Keep their established
         // compatibility behavior; updated peers cannot display old ranks.
         if (epochAwareTables) {
@@ -196,6 +206,9 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                     val next = decodedGeometry ?: CastTimingProtocol.decodeGeometry(j)
                     geometry = next
                     frame = null
+                    lastFrameReceivedMs = -1L
+                    // The last-good tower belongs to the same playback/seek.
+                    // It needs driver metadata, not the new map's coordinates.
                 }
             }
             "table" -> {
@@ -268,6 +281,8 @@ internal class CastTimingReceiver(private val nowMs: () -> Long = SystemClock::e
                     lastTableReceivedMs = -1L
                 }
                 frame = next
+                towerFrame = next
+                towerGeometry = geometry?.takeIf { it.id == next.geometryId }
                 if (oneAhead) aheadTableFramesRecovered++
                 pendingLegacySeek = null
                 lastSequence = sequence
