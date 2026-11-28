@@ -572,7 +572,7 @@ class FeedPlayer(
             ) {
                 val now = System.nanoTime()
                 sceneCodecCorrelation.onCodecFrame(presentationTimeUs, releaseTimeNs, now)
-                if (!DiagnosticLogs.recording || archiveVodSession == null) return
+                if (!DiagnosticLogs.recording) return
                 codecReleaseTiming.record(presentationTimeUs, releaseTimeNs, now)
                 if (Trace.isEnabled()) {
                     Trace.setCounter("PitwallCodecPtsMs", presentationTimeUs / 1000L)
@@ -580,7 +580,8 @@ class FeedPlayer(
                 }
                 if (now - lastCodecReleaseLogNs >= 5_000_000_000L) {
                     val sample = codecReleaseTiming.snapshotAndReset()
-                    Log.i("ApexviewSingleDecoder", "SCENE_CODEC_RELEASE frames=${sample.frames} " +
+                    val tag = if (outputCadence.composedSingle) "SCENE_CODEC_RELEASE" else "DIRECT_CODEC_RELEASE"
+                    Log.i("ApexviewSingleDecoder", "$tag frames=${sample.frames} " +
                         "ptsBins13_19_23_30_45_100=${sample.ptsIntervals.compact()} " +
                         "plannedReleaseBins13_19_23_30_45_100=${sample.plannedReleaseIntervals.compact()} " +
                         "plannedLeadP95UpperMs=${sample.plannedReleaseLead.percentileUpperMs(95)} " +

@@ -227,7 +227,7 @@ internal class SceneAsyncTextureLatch private constructor(
         // the driver stalls, parent teardown can finish without terminating
         // the display or deleting the shared texture under this worker.
         val lease = SceneEglDisplays.acquire()
-        check(lease.display == display)
+        if (lease.display != display) { lease.close(); error("Unexpected EGL display during retirement") }
         val retired = java.util.concurrent.CompletableFuture<Unit>()
         val retirementLock = Any()
         val ledger = SceneGraphicsOwners.process
@@ -262,11 +262,14 @@ internal class SceneAsyncTextureLatch private constructor(
                     steps.run("egl-display") { lease.close() }
                     synchronized(retirementLock) {
                         completed = true
-                        quarantinedId?.let { ledger.remove(it, steps.failedCount) }
+                        quarantinedId?.let {
+                            ledger.remove(it, steps.failedCount)
+                            quarantined.remove(it)
+                        }
                     }
+                    thread.quitSafely()
                     check(steps.failedCount == 0) { "Unverified latch retirement: ${steps.failedCount} steps" }
                     retired.complete(Unit)
-                    thread.quitSafely()
                 } catch (error: Exception) {
                     // A failed fence cannot authorize image release. Keep this
                     // worker/context/lease alive until process shutdown rather
@@ -275,10 +278,12 @@ internal class SceneAsyncTextureLatch private constructor(
                 }
             }
         }
-        fun quarantine() = synchronized(retirementLock) {
+        fun quarantine(): Unit = synchronized(retirementLock) {
             if (!completed && quarantinedId == null) {
                 val id = ledger.newId()
                 quarantinedId = id
+                // Retain the actual image owner, not only its scalar ledger entry.
+                quarantined[id] = this@SceneAsyncTextureLatch
                 ledger.record(id, SceneGraphicsOwners.Owner("LATCH_RETIRING", 0, 0,
                     1, 0, 1, 0, 0, 0, 0))
                 ledger.beginRetirement(id)
@@ -296,6 +301,7 @@ internal class SceneAsyncTextureLatch private constructor(
 
     companion object {
         private const val PROTECTED = 0x32C0
+        private val quarantined = java.util.concurrent.ConcurrentHashMap<Long, SceneAsyncTextureLatch>()
 
         /** Called on the existing render context before attaching the codec. */
         fun tryCreate(display: EGLDisplay, config: EGLConfig, renderContext: EGLContext,
