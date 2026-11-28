@@ -146,10 +146,9 @@ class FeedPlayer(
         private set
 
     val player: ExoPlayer
-    private val directPresentation by lazy(LazyThreadSafetyMode.NONE) {
-        DirectPresentationOwner<androidx.media3.ui.PlayerView> { old, next ->
-            androidx.media3.ui.PlayerView.switchTargetView(player, old, next)
-        }
+    private val directPresentation = DirectPresentationOwner<androidx.media3.ui.PlayerView>(::transferDirectPresentation)
+    private fun transferDirectPresentation(old: androidx.media3.ui.PlayerView?, next: androidx.media3.ui.PlayerView?) {
+        androidx.media3.ui.PlayerView.switchTargetView(player, old, next)
     }
     internal fun attachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.attach(view)
     internal fun detachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.detach(view)

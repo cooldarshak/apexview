@@ -1514,7 +1514,8 @@ private fun TileView(
         // and z-order. L1 always uses SurfaceView for secure output.
         if (!controlsOnly) {
         val textureView = useTextureViewForFeed(tile.feed.usesSoftwareDrm, app.tiles.count { !it.protectedCompositionHidden })
-        key(tile.id, textureView) {
+        val presentationFeed = tile.feed
+        key(tile.id, textureView, presentationFeed) {
             AndroidView(
                 factory = { context ->
                     val layout = if (textureView) R.layout.player_texture else R.layout.player_surface
@@ -1532,10 +1533,10 @@ private fun TileView(
                     }
                 },
                 update = {
-                    tile.feed.attachDirectPresentation(it)
+                    presentationFeed.attachDirectPresentation(it)
                     it.subtitleView?.applyCaptionAppearance(app.settings.captionAppearance)
                 },
-                onRelease = { tile.feed.detachDirectPresentation(it) },
+                onRelease = { presentationFeed.detachDirectPresentation(it) },
                 modifier = Modifier.fillMaxSize(),
             )
         }
