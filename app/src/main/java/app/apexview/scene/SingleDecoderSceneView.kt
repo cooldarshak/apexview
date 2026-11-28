@@ -1070,7 +1070,8 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         steps.run("capture-notification") { endedCapture?.captureFailed("The viewer video output was replaced") }
         steps.run("recording") { saveClip() }
         config = null
-        steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
+        // The independent latch clears its listener on its owning worker.
+        steps.run("decoder-listener") { if (asyncInput == null) decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
         val independent = asyncInput.also { asyncInput = null }
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0

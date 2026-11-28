@@ -820,7 +820,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         lastLogNs = 0L
         lastPipelineWindowRevision = -1L
         nextGlProbeExpectedNs = 0L
-        steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
+        // The independent latch clears its listener on its owning worker.
+        steps.run("decoder-listener") { if (asyncInput == null) decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
         val independent = asyncInput.also { asyncInput = null }
         ingressNotifications = 0; ingressCoalesced = 0; ingressMaxWaitNs = 0

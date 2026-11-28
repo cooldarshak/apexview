@@ -210,7 +210,6 @@ internal class SceneAsyncTextureLatch private constructor(
         val outerSteps = SceneReleaseSteps { name, error ->
             android.util.Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
         }
-        outerSteps.run("listener") { frames.setOnFrameAvailableListener(null) }
         outerSteps.run("ingress") { ingress?.close() }
         ingress = null
         render.removeCallbacks(notifyRender)
@@ -227,6 +226,22 @@ internal class SceneAsyncTextureLatch private constructor(
         val ledger = SceneGraphicsOwners.process
         var quarantinedId: Long? = null
         var completed = false
+        var failureRecorded = false
+        fun quarantine(failedSteps: Int = 0): Unit = synchronized(retirementLock) {
+            if (!completed && quarantinedId == null) {
+                val id = ledger.newId()
+                quarantinedId = id
+                // Hold the actual owner until all GPU retirement steps succeed.
+                quarantined[id] = this@SceneAsyncTextureLatch
+                ledger.record(id, SceneGraphicsOwners.Owner("LATCH_RETIRING", 0, 0,
+                    1, 0, 1, 0, 0, 0, 0))
+                ledger.beginRetirement(id)
+            }
+            if (failedSteps > 0 && !failureRecorded) {
+                failureRecorded = true
+                ledger.retirementFailure(failedSteps)
+            }
+        }
         val fenceDeadlineNs = System.nanoTime() + 15_000_000_000L
         val task = object : Runnable {
             override fun run() {
@@ -247,6 +262,9 @@ internal class SceneAsyncTextureLatch private constructor(
                     val steps = SceneReleaseSteps { name, error ->
                         Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
                     }
+                    // This vendor call belongs on the latch worker too. Never
+                    // block the retiring render looper behind updateTexImage.
+                    steps.run("listener") { frames.setOnFrameAvailableListener(null) }
                     steps.run("sample-fence-destroy") { sampled?.let { check(EGL15.eglDestroySync(display, it)) } }
                     steps.run("acquire-fence-destroy") { acquired?.let { check(EGL15.eglDestroySync(display, it)) } }
                     sampled = null; acquired = null
@@ -255,41 +273,40 @@ internal class SceneAsyncTextureLatch private constructor(
                         EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
                     steps.run("egl-context") { check(EGL14.eglDestroyContext(display, context)) }
                     steps.run("egl-thread") { check(EGL14.eglReleaseThread()) }
-                    steps.run("egl-display") { lease.close() }
+                    // Do not release the independent display lease or admit a
+                    // competing graph if a GPU resource release was unverified.
+                    if (steps.failedCount == 0) steps.run("egl-display") { lease.close() }
+                    if (steps.failedCount > 0) {
+                        quarantine(steps.failedCount)
+                        throw IllegalStateException("Unverified latch retirement: ${steps.failedCount} steps")
+                    }
                     synchronized(retirementLock) {
                         completed = true
                         quarantinedId?.let {
-                            ledger.remove(it, steps.failedCount)
+                            ledger.remove(it)
                             quarantined.remove(it)
                         }
                     }
                     thread.quitSafely()
-                    check(steps.failedCount == 0) { "Unverified latch retirement: ${steps.failedCount} steps" }
                     retired.complete(Unit)
                 } catch (error: Exception) {
                     // A failed fence cannot authorize image release. Keep this
                     // worker/context/lease alive until process shutdown rather
                     // than pretend a failed wait completed the GPU commands.
+                    quarantine(1)
                     retired.completeExceptionally(error)
                 }
             }
         }
-        fun quarantine(): Unit = synchronized(retirementLock) {
-            if (!completed && quarantinedId == null) {
-                val id = ledger.newId()
-                quarantinedId = id
-                // Retain the actual image owner, not only its scalar ledger entry.
-                quarantined[id] = this@SceneAsyncTextureLatch
-                ledger.record(id, SceneGraphicsOwners.Owner("LATCH_RETIRING", 0, 0,
-                    1, 0, 1, 0, 0, 0, 0))
-                ledger.beginRetirement(id)
-            }
-        }
         try {
-            check(worker.post(task)) { "Decoder latch retirement queue closed" }
+            if (!worker.post(task)) {
+                quarantine(1)
+                error("Decoder latch retirement queue closed")
+            }
             retired.get(5L, TimeUnit.SECONDS)
         } catch (error: Exception) {
             quarantine()
+            if (error is InterruptedException) Thread.currentThread().interrupt()
             throw Fault(error)
         }
         check(outerSteps.failedCount == 0) { "Unverified latch callback retirement: ${outerSteps.failedCount} steps" }

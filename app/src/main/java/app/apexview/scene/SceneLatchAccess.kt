@@ -14,7 +14,7 @@ internal class SceneLatchAccess {
     fun beginClose(): Boolean = terminal.compareAndSet(false, true)
     fun <T> worker(block: () -> T): T = lock.withLock(block)
     fun <T> render(timeoutMs: Long, block: () -> T): T? {
-        if (!lock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) return null
-        try { return block() } finally { lock.unlock() }
+        if (closed || !lock.tryLock(timeoutMs, TimeUnit.MILLISECONDS)) return null
+        try { return if (closed) null else block() } finally { lock.unlock() }
     }
 }

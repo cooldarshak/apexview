@@ -22,9 +22,8 @@ import java.util.concurrent.atomic.AtomicReference
 @RunWith(AndroidJUnit4::class)
 class SceneAsyncTextureLatchAndroidTest {
     @Test fun sharedTextureSamplesExactFrameAndLatchesWithoutRenderLoop() {
-        val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
-        check(display != EGL14.EGL_NO_DISPLAY)
-        check(EGL14.eglInitialize(display, IntArray(1), 0, IntArray(1), 0))
+        val displayLease = SceneEglDisplays.acquire()
+        val display = displayLease.display
         var context = EGL14.EGL_NO_CONTEXT
         var output = EGL14.EGL_NO_SURFACE
         var owner: SceneAsyncTextureLatch? = null
@@ -124,16 +123,17 @@ class SceneAsyncTextureLatchAndroidTest {
             sample(second,false)
             latch.discard()
             assertEquals(0L,latch.sample(FloatArray(16)) { error("discarded image drawn") })
-            assertTrue(latch.takeStats().latches >= 2)
+            assertTrue(requireNotNull(latch.takeStats()).latches >= 2)
         } finally {
             try { producer?.release() } finally {
-                try { owner?.close() } finally {
+                var retired = false
+                try { owner?.close(); retired = true } finally {
                     if (program != 0) GLES20.glDeleteProgram(program)
-                    if (texture != 0) GLES20.glDeleteTextures(1,intArrayOf(texture),0)
+                    if (texture != 0 && retired) GLES20.glDeleteTextures(1,intArrayOf(texture),0)
                     EGL14.eglMakeCurrent(display,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_SURFACE,EGL14.EGL_NO_CONTEXT)
                     if (output != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display,output)
                     if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display,context)
-                    EGL14.eglTerminate(display)
+                    displayLease.close()
                     EGL14.eglReleaseThread()
                 }
             }

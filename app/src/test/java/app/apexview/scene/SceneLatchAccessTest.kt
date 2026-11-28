@@ -28,5 +28,6 @@ class SceneLatchAccessTest {
             owner.join(1000L)
         }
         assertFalse(owner.isAlive)
+        assertNull(access.render(5L) { error("closed owner must never admit another sampler") })
     }
 }
