@@ -42,7 +42,7 @@ internal class BakedCastCaptureWorker(
     private fun recordGraphicsOwner() {
         SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
             "BakedCastWorker", 0, 0, if (contextGl != EGL14.EGL_NO_CONTEXT) 1 else 0,
-            0, 0, 0, 0, 0, 0, pbuffers = if (pbuffer != EGL14.EGL_NO_SURFACE) 1 else 0))
+            0, 0, 0, 0, 0, 0, pbuffers = if (pbuffer != EGL14.EGL_NO_SURFACE) 1 else 0, castGroup = session.graphicsGroup))
     }
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var displayLease: DisplayLeaseRegistry.Lease<EGLDisplay>? = null
@@ -114,8 +114,9 @@ internal class BakedCastCaptureWorker(
         }
         recordGraphicsOwner()
         encoder = ReplayClipEncoder(context, display, contextGl, config, width, height,
-            castSample = session::videoSample, nativeRequested = session::nativeProcessingRequested)
-        directCapture = BakedCastGpuCapture(gl, width, height, overlay, drawVideo, detachVideo)
+            castSample = session::videoSample, nativeRequested = session::nativeProcessingRequested,
+            castGroup = session.graphicsGroup)
+        directCapture = BakedCastGpuCapture(gl, width, height, overlay, drawVideo, detachVideo, session.graphicsGroup)
         Log.i("PitwallCast", "BAKED_CAST_ENCODER_READY output=${width}x$height " +
             "thread=INDEPENDENT_EGL codec=AVC captureRequestsInFlight=1 timestampDomain=SOURCE_MEDIA")
     }

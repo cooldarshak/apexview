@@ -19,6 +19,7 @@ internal class BakedCastGpuCapture(
     private val overlay: BakedCastOverlay,
     private val drawVideo: (VideoTarget) -> Unit,
     private val detachVideo: (VideoTarget) -> Unit,
+    private val castGroup: Long? = null,
 ) : AutoCloseable {
     internal class VideoTarget(val surface: Surface, val width: Int, val height: Int, val fail: (Exception) -> Unit) {
         private val retirement = ProducerRetirement()
@@ -52,12 +53,12 @@ internal class BakedCastGpuCapture(
 
     init {
         try {
-            val videoInput = Input("BakedVideoQueue", width, height, gl) { pending?.let { it.videoReady = true; it.videoReadyNs = System.nanoTime(); complete(it) } }
+            val videoInput = Input("BakedVideoQueue", width, height, gl, castGroup) { pending?.let { it.videoReady = true; it.videoReadyNs = System.nanoTime(); complete(it) } }
             video = videoInput
             videoTarget = VideoTarget(videoInput.surface, width, height) { error ->
                 gl.post { pending?.let { fail(it, error) } }
             }
-            ui = Input("BakedOverlayQueue", width, height, gl) { pending?.let { it.uiReady = true; it.overlayReadyNs = System.nanoTime(); complete(it) } }
+            ui = Input("BakedOverlayQueue", width, height, gl, castGroup) { pending?.let { it.uiReady = true; it.overlayReadyNs = System.nanoTime(); complete(it) } }
         } catch (error: Exception) {
             close()
             throw error
@@ -158,7 +159,7 @@ internal class BakedCastGpuCapture(
     }
 
     private class Input(private val role: String, private val width: Int, private val height: Int,
-                        handler: Handler, frameAvailable: () -> Unit) : AutoCloseable {
+                        handler: Handler, private val castGroup: Long?, frameAvailable: () -> Unit) : AutoCloseable {
         private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
         private val ownerContext = EGL14.eglGetCurrentContext().also { check(it != EGL14.EGL_NO_CONTEXT) }
         val id = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }.single()
@@ -180,7 +181,7 @@ internal class BakedCastGpuCapture(
                 role, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 captureTextures = if (glRetired) 0 else 1,
                 captureQueues = if (queueReleased) 0 else 1,
-                captureWidth = width, captureHeight = height))
+                captureWidth = width, captureHeight = height, castGroup = castGroup))
         }
 
         init {

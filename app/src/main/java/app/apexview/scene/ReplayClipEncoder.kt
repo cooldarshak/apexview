@@ -30,6 +30,7 @@ internal class ReplayClipEncoder(
     private val height: Int,
     private val castSample: ((BakedCastTransportStream.Sample) -> Unit)? = null,
     private val nativeRequested: () -> Boolean = { false },
+    private val castGroup: Long? = null,
 ) {
     private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
     private fun recordGraphicsOwner() {
@@ -38,7 +39,7 @@ internal class ReplayClipEncoder(
             0, 0, 0, if (egl != EGL14.EGL_NO_SURFACE) 1 else 0, 0,
             0, 0, 0, 0, encoderInputs = if (input != null) 1 else 0,
             captureTextures = if (texture != 0) 1 else 0,
-            captureWidth = width, captureHeight = height))
+            captureWidth = width, captureHeight = height, castGroup = castGroup))
     }
 
     private val resolver = context.contentResolver

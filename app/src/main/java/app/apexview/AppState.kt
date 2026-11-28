@@ -1527,7 +1527,7 @@ class AppState(
         val connection = localConnection
         val receiver = googleCastRemoteClient
         val graphics = app.apexview.scene.SceneGraphicsOwners.process
-        val checkpoint = graphics.retirementCheckpoint()
+        val checkpoint = graphics.castRetirementCheckpoint(old.graphicsGroup)
         bakedRecoveryPending = true
         // Keep the authorized source player and foreground service. Do not
         // create a new encoder while the old graph is still retiring.
@@ -1538,7 +1538,7 @@ class AppState(
         bakedRecoveryJob = scope.launch {
             val retired = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
                 if (!old.awaitRetired()) return@withTimeoutOrNull false
-                while (!graphics.retiredSince(checkpoint)) kotlinx.coroutines.delay(50L)
+                while (!graphics.castRetiredSince(checkpoint)) kotlinx.coroutines.delay(50L)
                 true
             } == true
             if (generation != castPreparationGeneration) return@launch
@@ -7758,12 +7758,14 @@ class AppState(
     private var lastCastSenderDiagnosticMs = 0L
 
     fun syncTick() {
+        singleDecoderScenePlayer?.observeSteadyArchiveFreePool(settings.steadyArchiveFreeTrimTrial &&
+            !castControllerOnly && !castingActive && !castBusy && !externalDisplayActive)
         if (castControllerOnly) {
             bakedCastSession?.let { baked ->
                 val feed = singleDecoderScenePlayer
                 if (feed != null) {
                     feed.player.volume = 0f
-                    when (baked.producerPressure(android.os.SystemClock.elapsedRealtime())) {
+                    when (baked.producerPressure(android.os.SystemClock.elapsedRealtime(), playing)) {
                         app.apexview.cast.BakedProducerPressure.State.HOLD -> {
                             if (playing) {
                                 if (pressurePausedFeed !== feed) {

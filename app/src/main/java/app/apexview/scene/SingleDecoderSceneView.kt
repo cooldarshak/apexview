@@ -31,7 +31,8 @@ import androidx.media3.exoplayer.ExoPlayer
  * Logical windows sample regions of the already composed frame, with the usual layout/z order.
  * This renderer is used only for verified CLEAR media. Protected video keeps its secure path.
  */
-internal class SingleDecoderSceneView(context: Context, independentLatchEnabled: Boolean = true) : TextureView(context), TextureView.SurfaceTextureListener {
+internal class SingleDecoderSceneView(context: Context, independentLatchEnabled: Boolean = true,
+    private val castGroup: Long? = null) : TextureView(context), TextureView.SurfaceTextureListener {
     // BufferQueue backpressure can grow while the decoder texture waits for this
     // handler to run. Display priority helps latch callbacks without making the
     // UI thread do any GL work or introducing a second decoder/context.
@@ -1022,7 +1023,8 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
             (if (window != EGL14.EGL_NO_SURFACE) 1 else 0) + (if (castVideoSurface != EGL14.EGL_NO_SURFACE) 1 else 0),
             if (decoderTexture != null) 1 else 0,
             graphicsAtlasWidth, graphicsAtlasHeight, outputWidth.coerceAtLeast(0), outputHeight.coerceAtLeast(0),
-            localBufferWidth = localBufferObserved?.width ?: 0, localBufferHeight = localBufferObserved?.height ?: 0))
+            localBufferWidth = localBufferObserved?.width ?: 0, localBufferHeight = localBufferObserved?.height ?: 0,
+            castGroup = castGroup))
     }
 
     private fun guarded(lifetime: Long = surfaceLifetime.generation(), action: () -> Unit) {

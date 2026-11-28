@@ -6,8 +6,10 @@ internal class BakedProducerPressure {
     enum class State { RUN, HOLD, EXPIRED }
     private var sinceMs: Long? = null
 
-    fun update(nowMs: Long, high: Boolean, low: Boolean): State {
+    fun update(nowMs: Long, high: Boolean, low: Boolean, userPlaying: Boolean = true): State {
         require(nowMs >= 0L)
+        // Deliberate pause is not a transport stall. Resume gets a fresh hold deadline.
+        if (!userPlaying) { sinceMs = null; return State.RUN }
         val since = sinceMs
         if (since == null) {
             if (!high) return State.RUN

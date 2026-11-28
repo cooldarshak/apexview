@@ -65,7 +65,10 @@ internal object Media3MemoryOwners {
             previous.sourceAllocations?.isEmpty() != false
         val verified = playerReleased && trim.isSuccess && empty
         synchronized(this) {
-            if (!verified) unverifiedRetirements++
+            // A successful player release with outstanding blocks is pending,
+            // not a terminal failure. The physical gate still requires zero
+            // pending owners and bytes at its terminal deadline.
+            if (!playerReleased || trim.isFailure) unverifiedRetirements++
             if (empty) {
                 pendingRetirements.remove(allocator)
                 owners.remove(allocator)
@@ -74,7 +77,8 @@ internal object Media3MemoryOwners {
                 owners[allocator] = previous.copy(role = "RETIRE_PENDING")
             }
         }
-        if (!verified) android.util.Log.e("PitwallPlayback", "MEDIA3_RETIREMENT_UNVERIFIED owner=${previous.id} released=$playerReleased activeBytes=${allocator.totalBytesAllocated} freeBytes=${allocator.unusedBytesAllocated}")
+        if (!playerReleased || trim.isFailure) android.util.Log.e("PitwallPlayback", "MEDIA3_RETIREMENT_UNVERIFIED owner=${previous.id} released=$playerReleased activeBytes=${allocator.totalBytesAllocated} freeBytes=${allocator.unusedBytesAllocated}")
+        else if (!verified) android.util.Log.i("PitwallPlayback", "MEDIA3_RETIREMENT_PENDING owner=${previous.id} activeBytes=${allocator.totalBytesAllocated} freeBytes=${allocator.unusedBytesAllocated}")
     }
 
     private fun reconcileRetired() {

@@ -204,6 +204,12 @@ def evaluate(manifest, root):
             # Fixed conservative initial tolerance; no ratcheting baseline.
             if after[key] > before[key] + max(5, before[key] * .02):
                 reasons.append(key + " regressed")
+        # A group median must not conceal an individual peak or residual regression.
+        for _, _, baseline_result, candidate_result in group:
+            for key in (*LOWER, "pss_peak_mib", "graphics_peak_mib", "graphics_residual_mib"):
+                baseline_value = baseline_result[key]
+                if candidate_result[key] > baseline_value + max(5, baseline_value * .02):
+                    reasons.append(key + " paired repetition regressed")
         if reference(scenario):
             for _, _, _, result in group:
                 for key, limit in REF.items():

@@ -133,4 +133,23 @@ class SceneGraphicsOwnersTest {
         assertTrue(owners.fields().contains("scenePeakDecoderTextures=2"))
         assertTrue(owners.fields().contains("scenePeakScope=PROCESS_LIFETIME"))
     }
+    @Test fun castRestartIgnoresIndependentDisplayButRejectsLateConflictingGraph() {
+        val owners = SceneGraphicsOwners()
+        val group = owners.newId()
+        val independent = owners.newId()
+        val cast = owners.newId()
+        val display = SceneGraphicsOwners.Owner("IndependentDisplay", 1, 1, 1, 1, 0, 0, 0, 1920, 1080)
+        owners.record(independent, display)
+        owners.record(cast, display.copy(backend = "BakedPrivateDisplay", castGroup = group))
+        val checkpoint = owners.castRetirementCheckpoint(group)
+        owners.beginRetirement(cast)
+        assertFalse(owners.castRetiredSince(checkpoint))
+        owners.remove(cast)
+        assertTrue(owners.castRetiredSince(checkpoint))
+        val late = owners.newId()
+        owners.record(late, display.copy(backend = "LATCH_RETIRING", decoderTextures = 1))
+        assertFalse(owners.castRetiredSince(checkpoint))
+        owners.remove(late, 1)
+        assertFalse(owners.castRetiredSince(checkpoint))
+    }
 }

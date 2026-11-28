@@ -19,7 +19,14 @@ class MemoryGateTest(unittest.TestCase):
     def evidence(self, name, content):
         data = content.encode()
         (self.root / name).write_bytes(data)
-        return {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
+        return {"path": name, "sha256": hashlib.sha256(data).hexdigest()    def test_individual_peak_cannot_hide_behind_group_median(self):
+        manifest = self.manifest()
+        manifest["pairs"][0]["candidate"] = self.run_data(3, True, 548)
+        report = evaluate(manifest, self.root)
+        self.assertGreater(report["issues"], 0)
+        self.assertIn("pss_peak_mib paired repetition regressed", report["routes"][0]["issues"])
+
+}
 
     def run_data(self, index, candidate, pss=500, missing=False, retained=None):
         active_start, active_end, stop = 40000, 640000, 650000

@@ -50,7 +50,7 @@ internal class BakedCastPresentationOwner(
         SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
             "BakedPrivateDisplay", 0, 0, 0, if (window != null) 1 else 0, 0,
             0, 0, width, height, virtualDisplays = if (display != null) 1 else 0,
-            imageReaders = if (reader != null) 1 else 0))
+            imageReaders = if (reader != null) 1 else 0, castGroup = session.graphicsGroup))
     }
 
     fun start() {
@@ -167,10 +167,13 @@ internal class BakedCastPresentationOwner(
             output.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
             output.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_FULLSCREEN or
                 android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            // The View receiver also has width/height, initially zero.
+            val logicalWidth = width
+            val logicalHeight = height
             val view = ComposeView(context).apply {
                 setViewTreeLifecycleOwner(owner)
                 setViewTreeSavedStateRegistryOwner(owner)
-                setContent { AppTheme { BakedPresentationCanvas(app, output, width, height) } }
+                setContent { AppTheme { BakedPresentationCanvas(app, output, logicalWidth, logicalHeight) } }
             }
             compose = view
             setContentView(view)

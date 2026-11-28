@@ -1238,7 +1238,7 @@ internal fun PlaybackVideoCanvas(
         windowCaptureRequired = windowCaptureRequired,
     )
     val independentClearSurface = clearOutputMode == ClearSceneOutputMode.SURFACE_VIEW
-    if (scene != null && host != null) {
+    if (scene != null && host != null && (captureOverlay == null || scene.windows.isNotEmpty())) {
         // Fixed TV layouts need no full-screen black video buffer under the
         // separate tower/map. Preserve the original full-canvas capture path,
         // and keep free arrangement and PiP on the existing renderer.
@@ -1398,7 +1398,8 @@ internal fun PlaybackVideoCanvas(
         } else {
             // Capture-compatible TextureView, also the controlled A/B baseline.
             AndroidView(factory = { context -> SingleDecoderSceneView(context,
-                independentLatchEnabled = app.settings.independentTextureLatch).apply {
+                independentLatchEnabled = app.settings.independentTextureLatch,
+                castGroup = if (captureOverlay != null) bakedSession?.graphicsGroup else null).apply {
                 onDisplaySelected = { displayId -> host.setComposedOutputDisplay(this, displayId) }
                 onFailure = { reason ->
                     if (captureOverlay != null) bakedSession?.captureFailed(reason)
@@ -1422,7 +1423,7 @@ internal fun PlaybackVideoCanvas(
             }
         }
         } // host/backend output owner
-    } else if (app.sceneActivationPreparing) {
+    } else if (captureOverlay != null || app.sceneActivationPreparing) {
         // This visible state follows actual capture/decoder readiness, not a delay.
         // Keep source playback budget unchanged; do not reveal an incomplete grid.
         Box(Modifier.fillMaxSize().background(Color(0xFF101017)),

@@ -125,6 +125,14 @@ class Settings(context: Context) {
         prefs.edit().putInt("archiveSoftBudgetMiB", value).apply()
     }
 
+    // Independent free-only allocator trial; default remains the installed behavior.
+    var steadyArchiveFreeTrimTrial by mutableStateOf(prefs.getBoolean("steadyArchiveFreeTrimTrial", false))
+        private set
+    fun updateSteadyArchiveFreeTrimTrial(value: Boolean) {
+        steadyArchiveFreeTrimTrial = value
+        prefs.edit().putBoolean("steadyArchiveFreeTrimTrial", value).apply()
+    }
+
     var independentTextureLatch by mutableStateOf(prefs.getBoolean("independentTextureLatch", true))
         private set
     fun updateIndependentTextureLatch(value: Boolean) {

@@ -43,11 +43,12 @@ internal class BakedCastLiveSession(
     private var lastPublicationNs = 0L
     @Volatile var receiverRendering = false
     @Volatile private var receiverBuffering = false
+    internal val graphicsGroup = app.apexview.scene.SceneGraphicsOwners.process.newId()
     private val pressure = BakedProducerPressure()
     /** Main owner polls this before changing its one existing player's clock.
      * Pressure is cleared only by publication drain, not by dropping samples. */
-    @Synchronized fun producerPressure(nowMs: Long): BakedProducerPressure.State =
-        if (stopped) BakedProducerPressure.State.RUN else pressure.update(nowMs, pending.pressureHigh(), pending.pressureLow())
+    @Synchronized fun producerPressure(nowMs: Long, userPlaying: Boolean): BakedProducerPressure.State =
+        if (stopped) BakedProducerPressure.State.RUN else pressure.update(nowMs, pending.pressureHigh(), pending.pressureLow(), userPlaying)
     fun updateReceiverBuffering(buffering: Boolean) { receiverBuffering = buffering }
     @Synchronized fun receiverNeedsCapture(): Boolean =
         !stopped && receiverBuffering && pending.publishingBytes == 0L

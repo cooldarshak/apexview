@@ -15,6 +15,7 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         val captureWidth: Int = 0, val captureHeight: Int = 0,
         val localBufferWidth: Int = 0, val localBufferHeight: Int = 0,
         val virtualDisplays: Int = 0, val imageReaders: Int = 0,
+        val castGroup: Long? = null,
     ) {
         val capturePixels: Long get() = captureWidth.toLong() * captureHeight
         val active: Boolean get() = contexts != 0 || windows != 0 || decoderTextures != 0 ||
@@ -75,6 +76,21 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
     @Synchronized fun retiredSince(checkpoint: RetirementCheckpoint): Boolean =
         unverifiedRetirements == checkpoint.failures && checkpoint.ids.none { it in owners || it in pending } &&
             owners.isEmpty() && pending.isEmpty()
+    // A Cast restart waits for its own graph and any conflicting codec/capture graph.
+    // Unrelated display-only owners are allowed. Unknown failed retirements and
+    // quarantined decoder latches remain fail-closed.
+    data class CastRetirementCheckpoint(val group: Long, val ids: Set<Long>, val failures: Long)
+    private fun Owner.conflictsWithCast(group: Long): Boolean = castGroup == group ||
+        castGroup != null || decoderTextures != 0 || encoderInputs != 0 || captureTextures != 0 ||
+        captureQueues != 0 || virtualDisplays != 0 || imageReaders != 0 || backend.startsWith("Baked") ||
+        backend == "LATCH_RETIRING" || backend == "ReplayClipEncoder"
+    @Synchronized fun castRetirementCheckpoint(group: Long) = CastRetirementCheckpoint(group,
+        owners.filterValues { it.conflictsWithCast(group) }.keys.toSet(), unverifiedRetirements)
+    @Synchronized fun castRetiredSince(checkpoint: CastRetirementCheckpoint): Boolean =
+        unverifiedRetirements == checkpoint.failures &&
+            checkpoint.ids.none { it in owners || it in pending } &&
+            owners.values.none { it.conflictsWithCast(checkpoint.group) } &&
+            pending.all { owners[it]?.conflictsWithCast(checkpoint.group) == false }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
     @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
         " scenePendingRetirements=${pending.size} sceneUnverifiedRetirements=$unverifiedRetirements sceneFailedRetirementSteps=$failedRetirementSteps scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"

@@ -380,6 +380,27 @@ class FeedPlayer(
     private val memoryLoads = Media3LoadLedger()
     private var memoryOwnerRetired = false
     private var trimAfterSeek = false
+    private val steadyFreeTrim = SteadyArchiveFreeTrimPolicy()
+    private var steadyTrimSource: Any? = null
+    private var steadyTrimDisplay: Any? = null
+    internal fun observeSteadyArchiveFreePool(enabled: Boolean) {
+        if (memoryOwnerRetired) return
+        val source = archiveBufferSourceToken
+        val display = outputDisplayOwner
+        if (steadyTrimSource !== source || steadyTrimDisplay !== display) {
+            steadyFreeTrim.reset()
+            steadyTrimSource = source
+            steadyTrimDisplay = display
+        }
+        val eligible = enabled && source != null && display != null && archiveVodSession != null &&
+            !parkedForArchive && !remotePlaybackSuspended && !trimAfterSeek && firstFrameRendered &&
+            player.playbackState == Player.STATE_READY && player.isPlaying && player.playWhenReady
+        if (steadyFreeTrim.observe(android.os.SystemClock.elapsedRealtime(), eligible,
+                if (eligible) playbackAllocator.unusedBytesAllocated else 0)) {
+            val released = Media3MemoryOwners.trimFreeBlocks(playbackAllocator)
+            playbackEvent("steady-free-trim", "releasedBytes=$released freeBytes=${playbackAllocator.unusedBytesAllocated}")
+        }
+    }
     private fun trimInactivePool() {
         if (parkedForArchive || (remotePlaybackSuspended && activeVideoDecoderCount == 0 && activeAudioDecoders == 0)) {
             Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
@@ -717,6 +738,7 @@ class FeedPlayer(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState != Player.STATE_READY) steadyFreeTrim.reset()
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (playbackState == Player.STATE_READY && pendingSeekAtMs != null && pendingSeekReadyAtMs == null) {
                     pendingSeekReadyAtMs = now
@@ -765,6 +787,7 @@ class FeedPlayer(
             }
 
             override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                steadyFreeTrim.reset()
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
                     sceneCodecCorrelation.reset()
@@ -786,12 +809,14 @@ class FeedPlayer(
             }
 
             override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                steadyFreeTrim.reset()
                 sceneCodecCorrelation.reset()
                 codecReleaseTiming.resetEpoch()
                 playbackEvent("playback-rate", "speed=${playbackParameters.speed}")
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (!isPlaying) steadyFreeTrim.reset()
                 if (isPlaying) problem = null
             }
 
@@ -1747,6 +1772,9 @@ class FeedPlayer(
         archiveForwardBuffers.unbindProduction()
         archiveBufferSourceToken = null
         memoryOwnerRetired = true
+        steadyFreeTrim.reset()
+        steadyTrimSource = null
+        steadyTrimDisplay = null
         memoryLoads.clearPending()
         outputCadence.composedSingle = false
         outputDisplayOwner = null

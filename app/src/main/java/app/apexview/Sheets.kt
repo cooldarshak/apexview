@@ -510,6 +510,8 @@ fun SettingsScreen(app: AppState) {
                         "uses one EGL context with the same renderer and protection. Compare identical feeds and quality.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+                SwitchRow("Steady archive free-block trim (A/B)",
+                    s.steadyArchiveFreeTrimTrial, s::updateSteadyArchiveFreeTrimTrial)
                 Text("Clear archive buffer budget (A/B)", style = Type.footnote,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                 for (mib in listOf(36, 48, 55)) {
