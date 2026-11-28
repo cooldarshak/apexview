@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pitwall M59 paired memory evidence v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "pairs"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "pairs": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": [
+          "baseline",
+          "candidate"
+        ],
+        "properties": {
+          "baseline": {
+            "$ref": "#/$defs/run"
+          },
+          "candidate": {
+            "$ref": "#/$defs/run"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "commit",
+        "apk_sha256",
+        "pid",
+        "scenario",
+        "thermal_end",
+        "profiled",
+        "idle_ms",
+        "active_ms",
+        "terminal_stop_ms",
+        "memory_log",
+        "presentation_evidence",
+        "quality_and_function_review"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "apk_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "scenario": {
+          "type": "object",
+          "required": [
+            "device",
+            "firmware",
+            "content_id",
+            "source_profile",
+            "decoder_mode",
+            "protection",
+            "delivery",
+            "feed_count",
+            "overlay",
+            "speed",
+            "display_policy",
+            "display_hz",
+            "cache_state",
+            "network_profile",
+            "renderer",
+            "software_drm",
+            "screen_state",
+            "codec",
+            "thermal_start"
+          ]
+        },
+        "thermal_end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "profiled": {
+          "const": false
+        },
+        "idle_ms": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "active_ms": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "terminal_stop_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_log": {
+          "$ref": "#/$defs/artifact"
+        },
+        "presentation_evidence": {
+          "$ref": "#/$defs/artifact"
+        },
+        "quality_and_function_review": {
+          "const": "PASS"
+        }
+      }
+    }
+  }
+}

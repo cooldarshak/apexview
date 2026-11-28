@@ -14,6 +14,7 @@ from pathlib import Path
 
 from analyze_pitwall_runtime import app_session, summarize as app_summary
 from analyze_pitwall_frames import read_timeline, summary as timeline_summary
+from pitwall_memory_gate import evaluate as evaluate_memory
 
 OVERLAYS = frozenset({"OFF", "MAP", "TOWER", "BOTH"})
 SPEEDS = frozenset({1.0, 1.5})
@@ -65,7 +66,7 @@ class Case:
             not case.content_id.strip() or not case.source_profile.strip() or
             case.decoder_mode not in {"SINGLE", "MULTIPLE"} or
             case.protection not in {"CLEAR_HEVC", "WIDEVINE_HEVC"} or
-            case.delivery not in {"PHONE", "ANDROID_TV", "PITWALL_CAST"} or
+            case.delivery not in {"PHONE", "ANDROID_TV", "PITWALL_CAST", "GOOGLE_CAST"} or
             case.thermal_start not in range(0, 7) or case.thermal_end not in range(0, 7)):
             raise ValueError("Invalid playback/decoder/DRM/Cast/thermal scenario metadata")
         return case
@@ -165,13 +166,15 @@ def evaluate(case):
 
 
 def run(manifest):
-    cases = [Case.parse(obj, manifest.parent) for obj in
-             json.loads(manifest.read_text(encoding="utf-8"))["runs"]]
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    memory = evaluate_memory(data["memory_evidence"], manifest.parent)
+    cases = [Case.parse(obj, manifest.parent) for obj in data["runs"]]
     validate_groups(cases)
     records = [evaluate(case) for case in cases]
     # This report never signs a physical gate. Its job is to reject hidden
     # missing evidence and expose regressions for engineering triage.
-    return {"scenarios": records, "issues": sum(bool(r["issues"]) for r in records),
+    return {"scenarios": records, "memory": memory,
+            "issues": sum(bool(r["issues"]) for r in records) + memory["issues"],
             "release_gate": "OPEN_PHYSICAL_EVIDENCE_REQUIRED"}
 
 
