@@ -486,8 +486,10 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("val memoryWarmLimit = if (constrained) 0 else ArchiveBufferPolicy.memoryWarmLimit(localLimit, headroom, observed.input, observed.output)", session)
         self.assertIn("NativeStitchingDeviceBudget.observePressure(headroom)", session)
         self.assertIn("if (NativeStitchingDeviceBudget.observePressure(currentMemory)) break", session)
-        self.assertIn("!closed && requestEpoch == productionEpoch && memoryWarmLimit > 0", session)
-        self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, memoryWarmLimit)", session)
+        self.assertIn("!closed && requestEpoch == productionEpoch && budgetWarmLimit > 0", session)
+        self.assertIn("val budgetWarmLimit = ArchiveBufferPolicy.optionalWarmLimit(memoryWarmLimit", session)
+        self.assertIn("ArchiveBufferPolicy.optionalWarmLimit(currentLimit", session)
+        self.assertIn("ArchiveBufferPolicy.warmFollowing(number, groups.lastIndex, budgetWarmLimit)", session)
         # An already scheduled second group must recheck the live local
         # demand, not just reuse the limit captured by the scheduling thread.
         worker = session.split("for (candidate in next)", 1)[1].split("private fun preemptUnrelatedWarmup", 1)[0]
