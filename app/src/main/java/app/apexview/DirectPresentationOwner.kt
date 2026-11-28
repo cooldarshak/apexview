@@ -5,6 +5,7 @@ package app.apexview
 internal class DirectPresentationOwner<T : Any>(private val transfer: (T?, T?) -> Unit) {
     private var active: T? = null
     private var terminal = false
+    fun owns(target: T): Boolean = !terminal && active === target
     fun attach(next: T) {
         if (terminal || active === next) return
         val old = active

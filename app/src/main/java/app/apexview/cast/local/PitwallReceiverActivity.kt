@@ -182,6 +182,64 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var desiredSpeed by mutableFloatStateOf(1f)
     private var desiredVolume = 1f
     private var standardView: PlayerView? = null
+    private var standardOwner: DirectPresentationOwner<PlayerView>? = null
+    private val standardRecovery = DirectSurfaceRecovery()
+    private var standardAttachedAtMs = Long.MAX_VALUE
+    private var standardSurface: android.view.Surface? = null
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun attachStandard(current: ExoPlayer, view: PlayerView) {
+        if (player !== current) return
+        val owner = standardOwner ?: return
+        if (owner.owns(view)) return
+        standardRecovery.newTarget()
+        standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
+        standardSurface = (view.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
+        owner.attach(view)
+        standardView = view
+        setReceiverOutputDisplay(view, view.display?.displayId)
+    }
+
+    private fun detachStandard(current: ExoPlayer, view: PlayerView) {
+        if (player !== current || standardOwner?.owns(view) != true) return
+        standardView = null
+        standardSurface = null
+        standardRecovery.newTarget()
+        setReceiverOutputDisplay(view, null)
+        standardOwner?.detach(view)
+    }
+
+    private fun checkStandardTarget() {
+        val current = player ?: return
+        val view = standardView ?: return
+        val owner = standardOwner ?: return
+        if (!owner.owns(view)) return
+        val surface = (view.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
+        if (surface !== standardSurface) {
+            standardSurface = surface
+            standardRecovery.newTarget()
+            standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
+        }
+        val eligible = surface?.isValid == true && current.playWhenReady &&
+            current.playbackState == Player.STATE_READY &&
+            current.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
+        when (standardRecovery.observe(android.os.SystemClock.elapsedRealtime(), eligible)) {
+            DirectSurfaceRecovery.Action.NONE -> Unit
+            DirectSurfaceRecovery.Action.REBIND -> {
+                // Rebind the same secure/clear target on the same player. No
+                // seek, second codec, new DRM session, or quality change.
+                try {
+                    standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
+                    owner.detach(view)
+                    owner.attach(view)
+                    Log.w("PitwallReceiver", "DIRECT_SURFACE_REBIND generation=$generation")
+                } catch (error: Exception) {
+                    fail("TV direct video surface could not be rebound safely")
+                }
+            }
+            DirectSurfaceRecovery.Action.FAILED -> fail("TV direct video surface did not render after rebind")
+        }
+    }
     private val httpDelegate = lazy { OkHttpClient.Builder().followRedirects(false).followSslRedirects(false).build() }
     private val receiverHttp by httpDelegate
     private var server: ServerSocket? = null
@@ -226,6 +284,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 delay(1_000)
                 if (versionReceived) connection?.send(FcastProtocol.PING)
                 if (approved) sendPlayback()
+                if (active) checkStandardTarget()
                 if (approved && timingPeer && active) {
                     val now = android.os.SystemClock.elapsedRealtime()
                     if (lastTimingHealthAtMs < 0L || now - lastTimingHealthAtMs >= 5_000L) {
@@ -735,6 +794,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
         })
         receiverTrackSelector = selector
+        standardOwner = DirectPresentationOwner { old, replacement -> PlayerView.switchTargetView(next, old, replacement) }
         scene = nextScene; player = next; active = true; generation++; renderingReported = false; decoderCount = 0
         var receiverAudioDecoders = 0
         val receiverLoads = app.apexview.Media3LoadLedger()
@@ -815,7 +875,15 @@ class PitwallReceiverActivity : ComponentActivity() {
             }
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
                 // For a scene, wait for the GLES output swap, not merely codec output to its texture.
-                if (player === next && (scene == null || surfacePlayback(scene, direct))) reportRendering()
+                val view = standardView
+                val surface = (view?.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
+                if (player === next && view != null && standardOwner?.owns(view) == true &&
+                    (scene == null || surfacePlayback(scene, direct)) &&
+                    surface?.isValid == true && output === surface && renderTimeMs >= standardAttachedAtMs) {
+                    standardSurface = surface
+                    standardRecovery.acknowledge()
+                    reportRendering()
+                }
             }
         })
         next.addListener(object : Player.Listener {
@@ -973,7 +1041,8 @@ class PitwallReceiverActivity : ComponentActivity() {
         val clearScene = sceneView.also { sceneView = null }
         val protectedScene = protectedSceneView.also { protectedSceneView = null }
         val correlation = sceneCodecCorrelation.also { sceneCodecCorrelation = null }
-        val standard = standardView.also { standardView = null }
+        standardView = null; standardSurface = null; standardRecovery.newTarget()
+        val standard = standardOwner.also { standardOwner = null }
         val previous = player.also { player = null }
         receiverMemorySnapshot = null
         receiverTrackSelector = null
@@ -993,7 +1062,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCadence?.activeDisplayId = -1
         receiverCadence = null
         receiverDisplayOwner = null
-        retire("standard-view") { standard?.player = null }
+        retire("standard-view") { standard?.close() }
         retire("player") { previous?.release() }
         retire("allocator-registration") { previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it) } }
         retire("allocator-trim") { previousAllocator?.let { app.apexview.Media3MemoryOwners.trimFreeBlocks(it, 0) } }
@@ -1032,18 +1101,19 @@ class PitwallReceiverActivity : ComponentActivity() {
                                 model.windows.singleOrNull()?.let { cell ->
                                     AndroidView(factory = { context ->
                                         (android.view.LayoutInflater.from(context).inflate(R.layout.player_surface, null) as PlayerView).apply {
-                                            standardView = this; player = current; useController = false
+                                            useController = false
                                             setEnableComposeSurfaceSyncWorkaround(true)
                                             (videoSurfaceView as? android.view.SurfaceView)?.setSecure(secureOutput)
+                                            attachStandard(current, this)
                                         }
                                     }, update = {
-                                        it.player = current
+                                        attachStandard(current, it)
                                         it.subtitleView?.apply {
                                             applyCaptionAppearance(captionAppearance)
                                             visibility = if (receiverCaptionReady) android.view.View.VISIBLE else android.view.View.INVISIBLE
                                         }
                                     }, onRelease = {
-                                        if (standardView === it) standardView = null; it.player = null
+                                        detachStandard(current, it)
                                     }, modifier = Modifier.offset { androidx.compose.ui.unit.IntOffset((cell.x * scale).toInt(), (cell.y * scale).toInt()) }
                                         .requiredSize(with(density) { (cell.width * scale).toDp() }, with(density) { (cell.height * scale).toDp() }))
                                 }
@@ -1083,10 +1153,10 @@ class PitwallReceiverActivity : ComponentActivity() {
                             CastTimingLayer(timingState, model.width, model.height, remember { { controllerPosition() } }, { number, pit ->
                                 connection?.send(FcastProtocol.UI_CONTROL, JSONObject().put("action", if (pit) "pitDriver" else "driver").put("number", number))
                             }, { rows, cars ->
-                                if (!timingReported && (rows > 0 || cars > 0)) {
+                                if (player === current && generation == viewGeneration && !timingReported && (rows > 0 || cars > 0)) {
                                     timingReported = true
                                     window.decorView.post {
-                                        if (active && timingPeer) connection?.send(FcastProtocol.TIMING, JSONObject().put("kind", "drawn")
+                                        if (active && timingPeer && player === current && generation == viewGeneration) connection?.send(FcastProtocol.TIMING, JSONObject().put("kind", "drawn")
                                             .put("playbackId", playData?.optJSONObject("metadata")?.optJSONObject("custom")?.optString("playbackId"))
                                             .put("rows", rows).put("cars", cars))
                                         Log.i("PitwallReceiver", "TIMING_UI_DRAWN rows=$rows cars=$cars")
@@ -1095,14 +1165,18 @@ class PitwallReceiverActivity : ComponentActivity() {
                             }, nativeRequested = captionSettings.nativeRustStitching)
                             }
                         }
-                    } else AndroidView(factory = { PlayerView(it).apply { standardView = this; player = current; useController = true } },
+                    } else AndroidView(factory = { PlayerView(it).apply {
+                        useController = true
+                        (videoSurfaceView as? android.view.SurfaceView)?.setSecure(secureOutput)
+                        attachStandard(current, this)
+                    } },
                         update = {
                             it.subtitleView?.apply {
                                 applyCaptionAppearance(captionAppearance)
                                 visibility = if (receiverCaptionReady) android.view.View.VISIBLE else android.view.View.INVISIBLE
                             }
                         },
-                        onRelease = { if (standardView === it) standardView = null; it.player = null }, modifier = Modifier.fillMaxSize())
+                        onRelease = { detachStandard(current, it) }, modifier = Modifier.fillMaxSize())
                 }
             } else Column(
                 Modifier.fillMaxWidth().widthIn(max = 680.dp)
