@@ -46,6 +46,7 @@ internal object PlaybackLifetime {
     internal class Owner(context: Context, userAgent: String, chromeMajor: String) : AutoCloseable {
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private var controller: Any? = null
+        private var controllerVisible = false
         private var login: (() -> Unit)? = null
         private var started = false
         val attached get() = controller != null
@@ -69,6 +70,7 @@ internal object PlaybackLifetime {
 
         fun attach(token: Any, login: () -> Unit, secure: () -> Boolean) {
             controller = token
+            controllerVisible = false
             this.login = login
             app.attachControllerSecurity(secure)
             if (!started) {
@@ -80,8 +82,10 @@ internal object PlaybackLifetime {
                 scope.launch {
                     while (true) {
                         delay(500L)
-                        if (!attached) {
-                            if (!app.retainForCast()) { retire(this@Owner); break }
+                        if (!attached && !app.retainForCast()) { retire(this@Owner); break }
+                        if (!controllerVisible && app.retainForCast()) {
+                            // Private baked presentation has its own tick; remote
+                            // routes still need a clock when the Activity is stopped.
                             if (app.bakedCastSession == null) app.syncTick()
                             if (DiagnosticLogs.recording) app.logPlaybackSample()
                         }
@@ -89,10 +93,14 @@ internal object PlaybackLifetime {
                 }
             }
         }
+        fun setControllerVisible(token: Any, visible: Boolean) {
+            if (controller === token) controllerVisible = visible
+        }
         fun detach(token: Any): Boolean {
             if (controller !== token) return false
             app.detachControllerSecurity()
             controller = null
+            controllerVisible = false
             login = null
             return true
         }
@@ -101,6 +109,7 @@ internal object PlaybackLifetime {
         }
         override fun close() {
             controller = null
+            controllerVisible = false
             login = null
             app.detachControllerSecurity()
             castContext?.sessionManager?.removeSessionManagerListener(castSessionListener, CastSession::class.java)

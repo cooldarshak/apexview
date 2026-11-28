@@ -59,6 +59,8 @@ class MainActivity : FragmentActivity() {
     private lateinit var playbackOwner: PlaybackLifetime.Owner
     private var externalDisplay: ExternalDisplayController? = null
     private var frameDiagnostics: WindowFrameDiagnostics? = null
+    private var controllerStarted = false
+    private var controllerCompositionRetired = false
     private val login = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         app.onLoginFinished()
     }
@@ -75,7 +77,14 @@ class MainActivity : FragmentActivity() {
             secure = { window.attributes.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0 })
         app = playbackOwner.app
         externalDisplay = ExternalDisplayController(this, app)
-        setContent { AppTheme { Root(app) } }
+        mountController()
+        // The process owner, not the hidden Activity window, owns active Cast.
+        // Also observe a Cast route which finishes preparing after onStop.
+        lifecycleScope.launch {
+            androidx.compose.runtime.snapshotFlow { app.castControllerOnly }.collect { controllerOnly ->
+                if (controllerOnly && !controllerStarted) retireControllerComposition()
+            }
+        }
         // The fold's posture: half-open with the hinge running across the screen is laptop mode.
         lifecycleScope.launch {
             repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -148,9 +157,36 @@ class MainActivity : FragmentActivity() {
      * Dismissing the pop-out stops the app while it still reports picture-in-picture, which 0.13
      * to 0.26 read as "still showing" and kept playing. Now any stop pauses (and saves the spot).
      */
+    private fun mountController() {
+        controllerCompositionRetired = false
+        setContent { AppTheme { Root(app) } }
+    }
+
+    private fun retireControllerComposition() {
+        if (controllerCompositionRetired || !app.castControllerOnly || app.inPip) return
+        controllerCompositionRetired = true
+        val content = findViewById<android.view.ViewGroup>(android.R.id.content)
+        (content.getChildAt(0) as? androidx.compose.ui.platform.ComposeView)?.disposeComposition()
+        // Detach the controller's window tree and remembered artwork/overlays.
+        // Never touch the private baked presentation, player or Cast service.
+        setContentView(android.widget.FrameLayout(this))
+        android.util.Log.i("PitwallGraphics", "CAST_CONTROLLER_UI_RETIRED")
+    }
+
+    override fun onStart() {
+        super.onStart()
+        controllerStarted = true
+        playbackOwner.setControllerVisible(this, true)
+        if (controllerCompositionRetired) mountController()
+    }
+
     override fun onStop() {
         super.onStop()
+        controllerStarted = false
+        playbackOwner.setControllerVisible(this, false)
+        frameDiagnostics?.close(); frameDiagnostics = null
         app.pauseForBackground()
+        retireControllerComposition()
         trimOptionalPlaybackMemory()
     }
 

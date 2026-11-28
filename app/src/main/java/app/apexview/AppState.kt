@@ -7675,10 +7675,14 @@ class AppState(
                     feed.player.volume = 0f
                     when (baked.producerPressure(android.os.SystemClock.elapsedRealtime())) {
                         app.apexview.cast.BakedProducerPressure.State.HOLD -> {
-                            if (playing && pressurePausedFeed !== feed) {
-                                pressurePausedFeed = feed
+                            if (playing) {
+                                if (pressurePausedFeed !== feed) {
+                                    pressurePausedFeed = feed
+                                    android.util.Log.i("PitwallCast", "BAKED_PRODUCER_PRESSURE state=HOLD ${baked.health()}")
+                                }
+                                // A play command or another synchronization tick
+                                // must not accidentally defeat the producer hold.
                                 feed.player.playWhenReady = false
-                                android.util.Log.i("PitwallCast", "BAKED_PRODUCER_PRESSURE state=HOLD ${baked.health()}")
                             }
                         }
                         app.apexview.cast.BakedProducerPressure.State.RUN -> {
@@ -7716,7 +7720,7 @@ class AppState(
                     host.feed.player.playbackState == Player.STATE_READY, composedArchiveFillingBuffer)
                 tiles.filter { it !== host && it.contentId == leaderTile.contentId }
                     .forEach { it.feed.player.playWhenReady = sourcesMayPlay }
-                host.feed.player.playWhenReady = playing && leader.player.playbackState == Player.STATE_READY && !composedArchiveFillingBuffer
+                host.feed.player.playWhenReady = playing && pressurePausedFeed !== host.feed && leader.player.playbackState == Player.STATE_READY && !composedArchiveFillingBuffer
             }
         }
         leader.driftMs = null
@@ -7735,7 +7739,10 @@ class AppState(
         watchStrain()
 
         composedArchiveOriginMs?.let { origin ->
-            protectedCompositionHost?.feed?.syncComposedArchivePosition(leader.player.currentPosition - origin, playing && !composedArchiveFillingBuffer)
+            protectedCompositionHost?.feed?.let { host ->
+                host.syncComposedArchivePosition(leader.player.currentPosition - origin,
+                    playing && pressurePausedFeed !== host && !composedArchiveFillingBuffer)
+            }
         }
         val leaderClock = leader.wallClockMs()
         tiles.filter { it !== leaderTile && it !== protectedCompositionHost && it !in nativeArchiveTiles }.forEach { tile ->
