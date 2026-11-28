@@ -166,7 +166,13 @@ private class ThinningVideoRenderer(
                 mediaFormat?.takeIf { it.containsKey(MediaFormat.KEY_LOW_LATENCY) }
                     ?.getInteger(MediaFormat.KEY_LOW_LATENCY)?.toString()
             }.getOrNull() ?: "UNREPORTED"
+            fun output(key: String): String = runCatching { mediaFormat?.getInteger(key)?.toString() }.getOrNull() ?: "UNREPORTED"
             android.util.Log.i("PitwallGraphics", "CODEC_LOW_LATENCY_OUTPUT reported=$reported vendorPoolBytes=NOT_MEASURED")
+            android.util.Log.i("PitwallGraphics", "CODEC_OUTPUT_FORMAT display=${format.width}x${format.height} " +
+                "width=${output("width")} height=${output("height")} stride=${output("stride")} sliceHeight=${output("slice-height")} " +
+                "crop=${output("crop-left")},${output("crop-top")},${output("crop-right")},${output("crop-bottom")} " +
+                "colorFormat=${output("color-format")} colorStandard=${output("color-standard")} " +
+                "colorTransfer=${output("color-transfer")} colorRange=${output("color-range")} allocationBytes=NOT_MEASURED")
         }
     }
 

@@ -46,7 +46,15 @@ internal class ComposedCodecBufferFactory(
             // Reading these public keys cannot change codec or secure configuration.
             fun configured(key: String): Int =
                 runCatching { configuration.mediaFormat.getInteger(key) }.getOrDefault(-1)
-            Log.i("PitwallGraphics", "CODEC_BUFFER_POLICY codec=${info.name} " +
+            val canonical = runCatching {
+                android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).codecInfos
+                    .firstOrNull { it.name == info.name }?.canonicalName
+            }.getOrNull() ?: "UNREPORTED"
+            val operatingRate = runCatching { configuration.mediaFormat.getFloat(MediaFormat.KEY_OPERATING_RATE) }.getOrNull()
+            Log.i("PitwallGraphics", "CODEC_BUFFER_POLICY codec=${info.name} canonical=$canonical " +
+                "sdk=${Build.VERSION.SDK_INT} hardware=${info.hardwareAccelerated} secureCodec=${info.secure} " +
+                "surface=${configuration.surface != null} operatingRate=${operatingRate ?: "UNREPORTED"} " +
+                "profile=${configured(MediaFormat.KEY_PROFILE)} level=${configured(MediaFormat.KEY_LEVEL)} " +
                 "format=${format.width}x${format.height} " +
                 "configured=${configured(MediaFormat.KEY_WIDTH)}x${configured(MediaFormat.KEY_HEIGHT)} " +
                 "adaptiveMax=${configured(MediaFormat.KEY_MAX_WIDTH)}x${configured(MediaFormat.KEY_MAX_HEIGHT)} " +

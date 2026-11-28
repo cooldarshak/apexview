@@ -335,6 +335,10 @@ class FeedPlayer(
     private var firstFrameLogged = false
     private var seekSequence = 0
     private var pendingSeekAtMs: Long? = null
+    private var pendingSeekTargetMs = -1L
+    private var pendingSeekReadyAtMs: Long? = null
+    private var archiveStartupAtMs: Long? = null
+    private var archiveStartupSequence = 0L
     private var lastSampleUptimeMs = 0L
     private var lastSamplePositionMs = 0L
 
@@ -647,6 +651,10 @@ class FeedPlayer(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 val now = android.os.SystemClock.elapsedRealtime()
+                if (playbackState == Player.STATE_READY && pendingSeekAtMs != null && pendingSeekReadyAtMs == null) {
+                    pendingSeekReadyAtMs = now
+                    playbackEvent("seek-ready", "seek=$seekSequence elapsedMs=${now - requireNotNull(pendingSeekAtMs)} targetMs=$pendingSeekTargetMs")
+                }
                 if (playbackState == Player.STATE_BUFFERING || playbackState == Player.STATE_IDLE || playbackState == Player.STATE_ENDED)
                     archiveForwardBuffers.reset()
                 bufferEpisodes.onState(now, playbackState == Player.STATE_BUFFERING,
@@ -693,6 +701,7 @@ class FeedPlayer(
                 if (reason == Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
                     sceneCodecCorrelation.reset()
+                    codecReleaseTiming.resetEpoch()
                     archiveForwardBuffers.reset()
                 }
                 if (reason == Player.DISCONTINUITY_REASON_SEEK) {
@@ -701,10 +710,17 @@ class FeedPlayer(
                 }
                 if (DiagnosticLogs.recording && reason == Player.DISCONTINUITY_REASON_SEEK) {
                     pendingSeekAtMs = android.os.SystemClock.elapsedRealtime()
+                    pendingSeekTargetMs = newPosition.positionMs
+                    pendingSeekReadyAtMs = null
                     seekSequence++
                 }
                 playbackEvent("discontinuity", "fromMs=${oldPosition.positionMs} toMs=${newPosition.positionMs} " +
                     "reason=$reason seek=$seekSequence")
+            }
+
+            override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                codecReleaseTiming.resetEpoch()
+                playbackEvent("playback-rate", "speed=${playbackParameters.speed}")
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -752,6 +768,7 @@ class FeedPlayer(
                 format: Format,
                 decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
             ) {
+                codecReleaseTiming.resetEpoch()
                 nativeSourceRendition = if (archiveVodSession == null && protectedLiveDashSource == null &&
                     format.width > 0 && format.height > 0) format.width to format.height else null
                 playbackEvent("video-input-rendition", "requestedCap=${selectedVideoQuality.label} " +
@@ -789,6 +806,7 @@ class FeedPlayer(
                 initializationDurationMs: Long,
             ) {
                 sceneCodecCorrelation.reset()
+                codecReleaseTiming.resetEpoch()
                 decoder = decoderName
                 if (archiveVodSession != null) firstFrameRendered = false
                 activeVideoDecoderCount++
@@ -804,6 +822,7 @@ class FeedPlayer(
 
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 sceneCodecCorrelation.reset()
+                codecReleaseTiming.resetEpoch()
                 activeVideoDecoderCount = (activeVideoDecoderCount - 1).coerceAtLeast(0)
                 playbackEvent("codec-owner-release", "decoder=$decoderName count=$activeVideoDecoderCount actualCodecBytes=NOT_MEASURED")
                 if (activeVideoDecoderCount == 0) { decoder = ""; nativeSourceRendition = null }
@@ -822,8 +841,18 @@ class FeedPlayer(
                 val seekAt = pendingSeekAtMs
                 if (seekAt != null && renderTimeMs >= seekAt) {
                     playbackEvent("seek-rendered", "seek=$seekSequence elapsedMs=${renderTimeMs - seekAt} " +
-                        "positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder")
+                        "targetMs=$pendingSeekTargetMs positionMs=${eventTime.currentPlaybackPositionMs} " +
+                        "eventPositionMs=${eventTime.eventPlaybackPositionMs} readyElapsedMs=${pendingSeekReadyAtMs?.minus(seekAt) ?: -1} " +
+                        "decoder=$decoder physicalPresentation=NOT_MEASURED")
                     pendingSeekAtMs = null
+                    pendingSeekReadyAtMs = null
+                }
+                archiveStartupAtMs?.let { started ->
+                    if (archiveVodSession != null && renderTimeMs >= started) {
+                        playbackEvent("archive-startup-rendered", "generation=$archiveStartupSequence elapsedMs=${renderTimeMs - started} " +
+                            "positionMs=${eventTime.currentPlaybackPositionMs} decoder=$decoder physicalPresentation=NOT_MEASURED")
+                        archiveStartupAtMs = null
+                    }
                 }
                 if (!firstFrameLogged) {
                     playbackEvent("startup-rendered", "elapsedMs=${(renderTimeMs - createdAt).coerceAtLeast(0)} " +
@@ -1242,6 +1271,11 @@ class FeedPlayer(
             observeArchiveChild(video, token, 0)
             children.forEachIndexed { index, child -> observeArchiveChild(child, token, index + 1) }
             // A sparse or shorter text rendition must leave the full video timeline seekable.
+            pendingSeekAtMs = null
+            pendingSeekReadyAtMs = null
+            archiveStartupAtMs = android.os.SystemClock.elapsedRealtime()
+            archiveStartupSequence++
+            playbackEvent("archive-startup-begin", "generation=$archiveStartupSequence targetMs=$positionMs children=${children.size + 1}")
             player.setMediaSource(MergingMediaSource(true, video, *children.toTypedArray()), positionMs.coerceAtLeast(0))
             parkedForArchive = false
             updateMemoryOwner()
@@ -1251,6 +1285,7 @@ class FeedPlayer(
             player.prepare()
             Log.i("PitwallPlayback", "ARCHIVE_AUDIO_SOURCE_READY stableChildren=${audioChildren.size}")
         } catch (failure: Throwable) {
+            archiveStartupAtMs = null
             if (archiveVodSession === session) {
                 archiveVodSession = previousArchive
                 archiveBufferSourceToken = previousBufferSourceToken
@@ -1346,6 +1381,9 @@ class FeedPlayer(
     }
 
     internal fun releaseArchiveOwnership() {
+        archiveStartupAtMs = null
+        pendingSeekAtMs = null
+        pendingSeekReadyAtMs = null
         archiveForwardBuffers.unbindProduction()
         archiveBufferSourceToken = null
         archiveVodSession?.close(); archiveVodSession = null

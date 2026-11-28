@@ -20,6 +20,17 @@ class CodecReleaseTimingTest {
         assertEquals(0L, stats.snapshotAndReset().frames)
     }
 
+    @Test fun epochResetExcludesForwardSeekAndOldPlaybackRate() {
+        val stats = CodecReleaseTiming()
+        stats.record(1_000_000L, 1_000_000_000L, 999_000_000L)
+        stats.resetEpoch()
+        stats.record(40_000_000L, 2_000_000_000L, 1_999_000_000L)
+        val result = stats.snapshotAndReset()
+        assertEquals(1L, result.frames)
+        assertEquals(0L, result.ptsIntervals.count)
+        assertEquals(0L, result.plannedReleaseIntervals.count)
+    }
+
     @Test fun seekDiscontinuityMustNotCreateArtificialMediaInterval() {
         val stats = CodecReleaseTiming()
         stats.record(15_000_000L, 1_000_000_000L, 900_000_000L)

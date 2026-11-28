@@ -3,7 +3,7 @@ package app.apexview
 /**
  * The Media3 video-output scheduling clock, independent of SurfaceTexture and GL timings.
  * These are planned codec release times, not evidence that SurfaceFlinger presented a frame.
- * Invoked only on the player's video-renderer callback thread.
+ * Recording is on the renderer thread; epoch invalidation also runs on the player thread.
  */
 internal class CodecReleaseTiming {
     private var previousPtsUs = -1L
@@ -14,7 +14,7 @@ internal class CodecReleaseTiming {
     private val releaseIntervals = TimingBuckets()
     private val releaseLead = TimingBuckets()
 
-    fun record(presentationTimeUs: Long, plannedReleaseNs: Long, observedNs: Long) {
+    @Synchronized fun record(presentationTimeUs: Long, plannedReleaseNs: Long, observedNs: Long) {
         if (previousPtsUs >= 0 && presentationTimeUs > previousPtsUs) {
             val intervalUs = presentationTimeUs - previousPtsUs
             if (intervalUs <= Long.MAX_VALUE / 1000L) ptsIntervals.record(intervalUs * 1000L)
@@ -29,7 +29,13 @@ internal class CodecReleaseTiming {
         frames++
     }
 
-    fun snapshotAndReset(): Snapshot {
+    @Synchronized fun resetEpoch() {
+        previousPtsUs = -1L
+        previousReleaseNs = 0L
+        snapshotAndReset()
+    }
+
+    @Synchronized fun snapshotAndReset(): Snapshot {
         val result = Snapshot(frames, lateCallbacks, ptsIntervals.snapshotAndReset(),
             releaseIntervals.snapshotAndReset(), releaseLead.snapshotAndReset())
         frames = 0L
