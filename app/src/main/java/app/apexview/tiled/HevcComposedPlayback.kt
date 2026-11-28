@@ -12,6 +12,9 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultAllocator
+import app.apexview.PitwallPlayerMemoryPolicy
+import app.apexview.Media3MemoryOwners
 import androidx.media3.exoplayer.dash.DashMediaSource
 import java.io.EOFException
 import java.io.IOException
@@ -41,7 +44,10 @@ internal class HevcComposedPlayback(
         mediaFragments
     )
 
-    val player: ExoPlayer = ExoPlayer.Builder(context.applicationContext).build()
+    private val allocator = DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE)
+    val player: ExoPlayer = PitwallPlayerMemoryPolicy.build(
+        ExoPlayer.Builder(context.applicationContext), allocator,
+        PitwallPlayerMemoryPolicy.Role.CLEAR_COMPOSED_FIXTURE)
 
     init {
         val dataSourceFactory = DataSource.Factory {
@@ -54,6 +60,7 @@ internal class HevcComposedPlayback(
         val mediaSource = DashMediaSource.Factory(dataSourceFactory)
             .createMediaSource(mediaItem)
         player.setMediaSource(mediaSource)
+        Media3MemoryOwners.register(allocator, "clear-composed-fixture")
     }
 
     constructor(
@@ -86,7 +93,11 @@ internal class HevcComposedPlayback(
     private val releaseGate = app.apexview.PlaybackReleaseGate()
 
     fun release() {
-        if (releaseGate.beginRelease()) player.release()
+        if (!releaseGate.beginRelease()) return
+        try { player.release() } finally {
+            try { Media3MemoryOwners.trimFreeBlocks(allocator, 0) }
+            finally { Media3MemoryOwners.unregister(allocator) }
+        }
     }
 
     override fun close() = release()

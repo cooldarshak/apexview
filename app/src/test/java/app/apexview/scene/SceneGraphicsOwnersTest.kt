@@ -36,6 +36,17 @@ class SceneGraphicsOwnersTest {
         assertNull(events.last().third)
     }
 
+    @Test fun failedRetirementIsNotReportedAsVerifiedDriverRelease() {
+        val owners = SceneGraphicsOwners()
+        val id = owners.newId()
+        owners.record(id, SceneGraphicsOwners.Owner("TextureView", 1, 1, 1, 1, 1, 1920, 2176, 1920, 1080))
+        owners.remove(id, 2)
+        assertTrue(owners.snapshot().isEmpty())
+        assertTrue(owners.fields().contains("sceneUnverifiedRetirements=1"))
+        assertTrue(owners.fields().contains("sceneFailedRetirementSteps=2"))
+        assertTrue(owners.fields().contains("sceneGraphicsBytes=NOT_MEASURED"))
+    }
+
     @Test fun queueSurvivesTextureRetirementAndEncoderIsDistinct() {
         val owners = SceneGraphicsOwners()
         val queue = owners.newId()

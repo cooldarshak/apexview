@@ -1125,6 +1125,6 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         imageUniform = -1; transformUniform = -1; positionAttribute = -1; uvAttribute = -1
         graphicsLifetime = -1L
         graphicsAtlasWidth = 0; graphicsAtlasHeight = 0
-        SceneGraphicsOwners.process.remove(graphicsOwnerId)
+        SceneGraphicsOwners.process.remove(graphicsOwnerId, steps.failedCount)
     }
 }

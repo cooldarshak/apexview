@@ -42,7 +42,18 @@ internal class ComposedCodecBufferFactory(
                 .filter { it.type == 33 }
                 .mapNotNull { runCatching { HevcParameterSets.parseSps(it.bytes) }.getOrNull() }
                 .firstOrNull()
+            // Report the configured adaptive envelope independently of coded SPS.
+            // Reading these public keys cannot change codec or secure configuration.
+            fun configured(key: String): Int =
+                runCatching { configuration.mediaFormat.getInteger(key) }.getOrDefault(-1)
             Log.i("PitwallGraphics", "CODEC_BUFFER_POLICY codec=${info.name} " +
+                "format=${format.width}x${format.height} " +
+                "configured=${configured(MediaFormat.KEY_WIDTH)}x${configured(MediaFormat.KEY_HEIGHT)} " +
+                "adaptiveMax=${configured(MediaFormat.KEY_MAX_WIDTH)}x${configured(MediaFormat.KEY_MAX_HEIGHT)} " +
+                "maxInputBytes=${configured(MediaFormat.KEY_MAX_INPUT_SIZE)} " +
+                "spsDisplay=${sps?.displayWidth ?: -1}x${sps?.displayHeight ?: -1} " +
+                "spsBitDepth=${sps?.bitDepthLuma ?: -1}:${sps?.bitDepthChroma ?: -1} " +
+                "spsChroma=${sps?.chromaFormatIdc ?: -1} " +
                 "coded=${sps?.width ?: -1}x${sps?.height ?: -1} " +
                 "spsDpb=${sps?.maxDecPicBuffering?.joinToString(",") ?: "UNKNOWN"} " +
                 "spsReorder=${sps?.maxNumReorderPics?.joinToString(",") ?: "UNKNOWN"} " +

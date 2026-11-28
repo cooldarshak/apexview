@@ -6263,9 +6263,10 @@ class AppState(
         val base = timing?.radioBase ?: return
         val player = radioPlayer ?: run {
             val allocator = androidx.media3.exoplayer.upstream.DefaultAllocator(true, androidx.media3.common.C.DEFAULT_BUFFER_SEGMENT_SIZE)
-            androidx.media3.exoplayer.ExoPlayer.Builder(context)
-                .setLoadControl(androidx.media3.exoplayer.DefaultLoadControl.Builder().setAllocator(allocator).build())
-                .build().also { radioAllocator = allocator; Media3MemoryOwners.register(allocator, "radio") }
+            PitwallPlayerMemoryPolicy.build(
+                androidx.media3.exoplayer.ExoPlayer.Builder(context),
+                allocator, PitwallPlayerMemoryPolicy.Role.RADIO)
+                .also { radioAllocator = allocator; Media3MemoryOwners.register(allocator, "radio") }
         }.also { p ->
             radioPlayer = p
             p.setPlaybackSpeed(playbackSpeed)
@@ -6367,7 +6368,11 @@ class AppState(
     }
 
     fun stopRadio() {
-        radioPlayer?.stop()
+        radioPlayer?.let { player ->
+            player.stop()
+            player.clearMediaItems()
+        }
+        radioAllocator?.let { Media3MemoryOwners.trimFreeBlocks(it, 0) }
         radioPlaying = null
         tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
     }

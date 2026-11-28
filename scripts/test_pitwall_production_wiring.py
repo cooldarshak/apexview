@@ -15,6 +15,31 @@ def contents(path):
 
 
 class ProductionWiringTests(unittest.TestCase):
+    def test_m53_all_current_player_construction_paths_use_named_policy(self):
+        root = ROOT / "app/src/main/java"
+        found = {}
+        for path in root.rglob("*.kt"):
+            source = path.read_text(encoding="utf-8")
+            if "ExoPlayer.Builder(" in source:
+                found[path.name] = source.count("ExoPlayer.Builder(")
+                self.assertEqual(source.count("ExoPlayer.Builder("),
+                                 source.count("PitwallPlayerMemoryPolicy.build("), path.name)
+        self.assertEqual(found, {"FeedPlayer.kt": 1, "AppState.kt": 1,
+                                 "PitwallReceiverActivity.kt": 1, "HevcComposedPlayback.kt": 1})
+        for path in root.rglob("*.kt"):
+            if path.name != "PitwallPlayerMemoryPolicy.kt":
+                self.assertNotIn("DefaultLoadControl.Builder()", path.read_text(encoding="utf-8"), path.name)
+
+    def test_m51_m52_unknown_driver_retirement_and_adaptive_envelope_are_explicit(self):
+        base = "app/src/main/java/app/apexview/"
+        factory = contents(base + "ComposedCodecBufferFactory.kt")
+        self.assertIn("configured(MediaFormat.KEY_MAX_WIDTH)", factory)
+        self.assertIn("configured(MediaFormat.KEY_MAX_HEIGHT)", factory)
+        self.assertIn("vendorPoolBytes=NOT_MEASURED", factory)
+        for name in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
+            self.assertIn("remove(graphicsOwnerId, steps.failedCount)", contents(base + "scene/" + name))
+        self.assertIn("sceneUnverifiedRetirements", contents(base + "scene/SceneGraphicsOwners.kt"))
+
     def test_archive_native_publication_and_user_thermal_override(self):
         base = "app/src/main/java/app/apexview/"
         archive = contents(base + "tiled/HevcArchiveVodSession.kt")
@@ -67,9 +92,12 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertIn("if (token == generation) runCatching", diagnostics)
         self.assertIn("memory.totalPss", memory)
         self.assertIn("nativeFragmentArena=UNAVAILABLE", memory)
-        self.assertIn(".setAllocator(playbackAllocator)", feed)
-        self.assertIn("DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000", feed)
-        self.assertIn(".setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000)", receiver)
+        factory = contents("app/src/main/java/app/apexview/PitwallPlayerMemoryPolicy.kt")
+        self.assertIn("playbackAllocator, PitwallPlayerMemoryPolicy.Role.FEED, archiveForwardBuffers", feed)
+        self.assertIn("receiverAllocator, PitwallPlayerMemoryPolicy.Role.RECEIVER", receiver)
+        self.assertIn("DefaultLoadControl.Builder().setAllocator(allocator)", factory)
+        self.assertRegex(factory, r"DEFAULT_MIN_BUFFER_MS,\s*DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000")
+        self.assertIn("setBufferDurationsMs(5_000, 15_000, 1_000, 2_000)", factory)
         self.assertEqual(archive.count("cache.canSpeculate("), 1)
         self.assertIn("if (!cache.canSpeculate(candidate, currentSizes.output)) break", archive)
         self.assertIn("cacheRetiredPinnedBytes", archive)

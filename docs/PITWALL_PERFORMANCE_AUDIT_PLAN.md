@@ -5229,3 +5229,20 @@ Do not adopt PDF claims of guaranteed HWC, fixed 26 physical frames, 1x1 placeho
 See [Build 919 / M51–M60 engineering checkpoint](handovers/PITWALL_BUILD_919_M51_M60_ENGINEERING_2026-11-28.md). Queue analysis now reads the actual platformGraphicsKiB field. Manual v2 simulated end-to-end named-config export passed; no physical coverage claim. No new build until unresolved unconditional P0 engineering scope is addressed.
 
 Preflight of this integrated source tree: 128/128 Python tests and git diff --check passed in a read-only scratch checkout; the exact new Kotlin policy blob 407ed8f499680b0c3f2c25627974b580f0198f8a compiled locally and passed 2,048 capability combinations, single success, same-codec retry, dual failure and continued terminal release. No Android or Rust compiler was available in the remote scratch. Build 919 log has exactly one peak app graphics owner/decoder texture/window and two EGL contexts; no simultaneous app graphics owner leak is established. Do not introduce a global blocking EGL gate across otherwise valid Cast/display handoffs. Complete the single existing consolidated CI verification for these source candidates; hardware reduction, true queue pressure, ART dominators and full Cast/TV acceptance remain open. No claim of physical completion.
+
+
+#### M51–M60 source implementation checkpoint (after research consolidation)
+
+M53: Centralized all four current ExoPlayer construction sites (feed including
+composed archive/live, radio, Pitwall receiver and clear composed fixture) in
+PitwallPlayerMemoryPolicy. Explicit role, independent allocator, existing
+time thresholds and measured archive policy retained. Radio stop clears
+obsolete media items and trims free blocks. No hard cap or discarded active
+samples. Static wiring regression blocks new bypasses. M51 logs configured
+adaptive maximum dimensions/input size and coded display/bit depth/chroma
+without modifying MediaFormat. M52 records failed retirement step count and
+unverified retirement count in existing scalar graphics diagnostics even when
+handles are cleared; a zero active-owner count is not proof of vendor release.
+Tests cover the failure accounting. This is a source checkpoint only; it does
+not complete all revised M51–M60 unconditional work or verify memory savings.
+No implementation build until remaining scope is complete.

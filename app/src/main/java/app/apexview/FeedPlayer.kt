@@ -24,7 +24,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -546,16 +545,12 @@ class FeedPlayer(
         // Starts once a second of picture is in rather than the default 2.5 (2 rather than 5 after
         // a stall): F1's chunks are almost 6 s each, so a feed starting mid-chunk otherwise waits
         // for the next one too.
-        val loadControl = DefaultLoadControl.Builder()
-            .setAllocator(playbackAllocator)
-            .setBufferDurationsMs(DefaultLoadControl.DEFAULT_MIN_BUFFER_MS, DefaultLoadControl.DEFAULT_MAX_BUFFER_MS, 1_000, 2_000)
-            .build()
-        player = ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))
-            .setMediaSourceFactory(sources)
-            .setLoadControl(ArchiveMeasuredLoadControl(loadControl, archiveForwardBuffers) { playbackAllocator.totalBytesAllocated.toLong() })
-            .setTrackSelector(sourceTrackSelector)
-            .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
-            .build()
+        player = PitwallPlayerMemoryPolicy.build(
+            ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))
+                .setMediaSourceFactory(sources)
+                .setTrackSelector(sourceTrackSelector)
+                .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context)),
+            playbackAllocator, PitwallPlayerMemoryPolicy.Role.FEED, archiveForwardBuffers)
         Media3MemoryOwners.register(playbackAllocator, "feed-$diagnosticId", sourceAllocations)
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L

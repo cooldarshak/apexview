@@ -24,6 +24,8 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
     }
     private val next = AtomicLong()
     private val owners = linkedMapOf<Long, Owner>()
+    private var unverifiedRetirements = 0L
+    private var failedRetirementSteps = 0L
     private var peakOwners = 0
     private var peakContexts = 0
     private var peakWindows = 0
@@ -48,10 +50,20 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         peakWindows = maxOf(peakWindows, owners.values.sumOf { it.windows })
         peakDecoderTextures = maxOf(peakDecoderTextures, owners.values.sumOf { it.decoderTextures })
     }
-    @Synchronized fun remove(id: Long) { owners.remove(id)?.let { onChange(id, it, null) } }
+    @Synchronized fun remove(id: Long, failedSteps: Int = 0) {
+        require(failedSteps >= 0)
+        // Cleared application handles are not proof the driver released them.
+        // Keep bounded, process-lifetime scalar failure evidence even if there
+        // was no fully initialized owner to register.
+        if (failedSteps > 0) {
+            unverifiedRetirements++
+            failedRetirementSteps += failedSteps
+        }
+        owners.remove(id)?.let { onChange(id, it, null) }
+    }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
     @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
-        " scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
+        " sceneUnverifiedRetirements=$unverifiedRetirements sceneFailedRetirementSteps=$failedRetirementSteps scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
     fun fields(): String {
         val (live, peaks) = diagnosticSnapshot()
         return " sceneGraphicsOwners=${live.size} sceneEglContexts=${live.values.sumOf { it.contexts }}" +

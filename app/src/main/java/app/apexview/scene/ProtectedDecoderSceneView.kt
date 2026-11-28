@@ -880,6 +880,6 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         positionAttribute = -1; texcoordAttribute = -1
         graphicsLifetime = -1L
         graphicsAtlasWidth = 0; graphicsAtlasHeight = 0
-        SceneGraphicsOwners.process.remove(graphicsOwnerId)
+        SceneGraphicsOwners.process.remove(graphicsOwnerId, steps.failedCount)
     }
 }

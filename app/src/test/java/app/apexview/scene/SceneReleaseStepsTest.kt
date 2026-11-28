@@ -13,5 +13,6 @@ class SceneReleaseStepsTest {
         steps.run("egl-context") { events += "context" }
         steps.run("surface") { events += "surface" }
         assertEquals(listOf("failed:capture", "decoder", "failed:egl-window", "context", "surface"), events)
+        assertEquals(2, steps.failedCount)
     }
 }

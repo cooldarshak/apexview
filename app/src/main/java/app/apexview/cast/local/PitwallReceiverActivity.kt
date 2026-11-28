@@ -36,7 +36,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
+import app.apexview.PitwallPlayerMemoryPolicy
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
@@ -716,11 +716,11 @@ class PitwallReceiverActivity : ComponentActivity() {
             Log.i("PitwallReceiver", "BAKED_HLS_EXTRACTOR detectAccessUnits=true")
             androidx.media3.exoplayer.hls.HlsMediaSource.Factory(data).setExtractorFactory(BakedHlsExtractorFactory())
         } else DefaultMediaSourceFactory(data).apply { widevine?.sessions?.let { key -> setDrmSessionManagerProvider { key } } }
-        val next = ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
-            .setMediaSourceFactory(sourceAllocations.factory(mediaFactory,
-                app.apexview.Media3SourceAllocationLedger.Kind.RECEIVER_MIXED))
-            .setLoadControl(DefaultLoadControl.Builder().setAllocator(receiverAllocator).setBufferDurationsMs(5_000, 15_000, 1_000, 2_000).build())
-            .build()
+        val next = PitwallPlayerMemoryPolicy.build(
+            ExoPlayer.Builder(this, renderers).setTrackSelector(selector)
+                .setMediaSourceFactory(sourceAllocations.factory(mediaFactory,
+                    app.apexview.Media3SourceAllocationLedger.Kind.RECEIVER_MIXED)),
+            receiverAllocator, PitwallPlayerMemoryPolicy.Role.RECEIVER)
         activeReceiverAllocator = receiverAllocator
         app.apexview.Media3MemoryOwners.register(receiverAllocator, "receiver", sourceAllocations)
         receiverCadence = cadence
