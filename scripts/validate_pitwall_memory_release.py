@@ -84,8 +84,20 @@ def require_matrix(report):
                         f"Missing paired route {delivery}/{mode}/{protection}")
     for delivery in ("GOOGLE_CAST", "PITWALL_CAST"):
         for screen in ("ON", "OFF"):
-            require(any(r["delivery"] == delivery and r["screen_state"] == screen
-                        for r in routes), f"Missing paired route {delivery}/{screen}")
+            for multiple in (False, True):
+                require(any(r["delivery"] == delivery and r["screen_state"] == screen
+                            and (r["feed_count"] > 1) == multiple and r["overlay"] == "BOTH"
+                            and r["protection"] == "CLEAR_HEVC" and r["speed"] == 1
+                            for r in routes), f"Missing paired clear overlay Cast route {delivery}/{screen}/multi={multiple}")
+    # Protected pixels never need to enter an unprotected baked encoder.
+    require(any(r["delivery"] == "PITWALL_CAST" and r["protection"] == "WIDEVINE_HEVC"
+                and r["overlay"] == "BOTH" for r in routes), "Missing protected native Pitwall Cast evidence")
+    for delivery in ("PHONE", "ANDROID_TV"):
+        for multiple in (False, True):
+            for overlay in ("OFF", "BOTH"):
+                require(any(r["delivery"] == delivery and (r["feed_count"] > 1) == multiple
+                            and r["overlay"] == overlay and r["speed"] == 1 for r in routes),
+                        f"Missing paired local route {delivery}/{overlay}/multi={multiple}")
     for speed in (1, 1.5):
         for overlay in ("OFF", "MAP", "TOWER", "BOTH"):
             require(any(r["delivery"] == "PHONE" and r["device"] == "SM-S908E" and

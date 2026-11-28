@@ -23,6 +23,7 @@ internal object Media3MemoryOwners {
     }
     @Synchronized fun update(allocator: DefaultAllocator, role: String, video: Int, audio: Int, items: Int,
                              forwardMs: Long = -1, backMs: Long = -1, loads: Media3LoadLedger.Snapshot? = null) {
+        if (allocator in pendingRetirements) return
         val prior = owners[allocator] ?: return
         owners[allocator] = Owner(prior.id, role, video, audio, items, forwardMs, backMs, loads, prior.sourceAllocations)
     }
@@ -58,7 +59,7 @@ internal object Media3MemoryOwners {
     /** A failed Media3 release must not disappear from the owner count. Only
      * free blocks are trimmed; still-leased SampleQueue blocks stay charged. */
     fun retire(allocator: DefaultAllocator, playerReleased: Boolean) {
-        val previous = synchronized(this) { owners[allocator] } ?: return
+        val previous = synchronized(this) { owners[allocator]?.takeUnless { allocator in pendingRetirements } } ?: return
         val trim = runCatching { trimFreeBlocks(allocator, 0) }
         val empty = allocator.totalBytesAllocated == 0 && allocator.unusedBytesAllocated == 0 &&
             previous.sourceAllocations?.isEmpty() != false
@@ -112,8 +113,8 @@ internal object Media3MemoryOwners {
     }
     fun trimUnused() {
         ownerSnapshot().forEach { (allocator, owner) ->
-            val inactive = owner.videoDecoders == 0 && owner.audioDecoders == 0 &&
-                ((owner.role == "ARCHIVE_PARKED" && owner.items == 0) || owner.role == "REMOTE")
+            val inactive = owner.role == "RETIRE_PENDING" || (owner.videoDecoders == 0 && owner.audioDecoders == 0 &&
+                ((owner.role == "ARCHIVE_PARKED" && owner.items == 0) || owner.role == "REMOTE"))
             trimFreeBlocks(allocator, if (inactive) 0 else ACTIVE_RESERVE_BYTES)
         }
     }

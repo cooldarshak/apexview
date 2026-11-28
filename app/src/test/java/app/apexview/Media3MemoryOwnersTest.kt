@@ -86,6 +86,23 @@ class Media3MemoryOwnersTest {
         Media3MemoryOwners.trimFreeBlocks(allocator, 0)
         assertEquals(0, allocator.unusedBytesAllocated)
     }
+    @Test fun failedRetirementKeepsActualOutstandingBlockUntilLateReaderReturns() {
+        val initial = Media3MemoryOwners.snapshot()
+        val backing = DefaultAllocator(true, 1024)
+        val ledger = Media3SourceAllocationLedger()
+        val source = ledger.allocator(backing, Media3SourceAllocationLedger.Kind.ARCHIVE_VIDEO)
+        Media3MemoryOwners.register(backing, "late-reader-test", ledger)
+        val block = source.allocate()
+        try {
+            Media3MemoryOwners.retire(backing, false)
+            assertEquals(initial.first + 1 to initial.second + 1024, Media3MemoryOwners.snapshot())
+            assertTrue(Media3MemoryOwners.ownerFields().contains("late-reader-test:RETIRE_PENDING:1024"))
+            Media3MemoryOwners.update(backing, "STALE_CALLBACK", 1, 1, 1)
+            assertTrue(Media3MemoryOwners.ownerFields().contains("late-reader-test:RETIRE_PENDING:1024"))
+        } finally { source.release(block) }
+        assertEquals(initial, Media3MemoryOwners.snapshot())
+        assertFalse(Media3MemoryOwners.ownerFields().contains("late-reader-test:"))
+    }
     @Test fun trimKeepsOutstandingAllocationsAndUnregistersBothPlayers() {
         val initial = Media3MemoryOwners.snapshot()
         val a = DefaultAllocator(true,1024)

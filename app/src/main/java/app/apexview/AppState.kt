@@ -6365,9 +6365,10 @@ class AppState(
             p.setPlaybackSpeed(playbackSpeed)
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) stopRadio()
+                    if (radioPlayer === p && state == Player.STATE_ENDED) stopRadio()
                 }
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    if (radioPlayer !== p) return
                     message = "Couldn't play that radio clip"
                     stopRadio()
                 }
@@ -6460,12 +6461,18 @@ class AppState(
         radioFailuresInRow = 0
     }
 
+    private fun retireRadioPlayer() {
+        val previous = radioPlayer.also { radioPlayer = null }
+        val allocator = radioAllocator.also { radioAllocator = null }
+        var released = false
+        try { previous?.release(); released = true } catch (error: Exception) {
+            android.util.Log.w("PitwallPlayback", "TERMINAL_RADIO_RELEASE_FAILED type=${error.javaClass.simpleName}")
+        } finally { allocator?.let { Media3MemoryOwners.retire(it, released) } }
+    }
+
     fun stopRadio() {
-        radioPlayer?.let { player ->
-            player.stop()
-            player.clearMediaItems()
-        }
-        radioAllocator?.let { Media3MemoryOwners.trimFreeBlocks(it, 0) }
+        // An ended clip is not an intentionally paused active player.
+        retireRadioPlayer()
         radioPlaying = null
         tiles.forEach { it.feed.setAudible(it.audible && !mutedAll && !castingActive) }
     }
@@ -7147,14 +7154,7 @@ class AppState(
         arranging = false
         mutedAll = false
         playing = true
-        var radioReleased = false
-        try { radioPlayer?.release(); radioReleased = true } catch (error: Exception) {
-            android.util.Log.w("PitwallPlayback", "TERMINAL_RADIO_RELEASE_FAILED type=${error.javaClass.simpleName}")
-        } finally {
-            radioAllocator?.let { Media3MemoryOwners.retire(it, radioReleased) }
-            radioAllocator = null
-            radioPlayer = null
-        }
+        retireRadioPlayer()
         radioPlaying = null
         mapStatus = null
     }
