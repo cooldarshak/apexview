@@ -62,6 +62,24 @@ class SceneGraphicsOwnersTest {
         assertTrue(owners.snapshot().isEmpty())
     }
 
+    @Test fun congestionRestartWaitsForAllOwnersAndRejectsFailedRetirement() {
+        val owners = SceneGraphicsOwners()
+        val id = owners.newId()
+        val state = SceneGraphicsOwners.Owner("Private", 0, 0, 0, 1, 0, 0, 0, 1920, 1080,
+            virtualDisplays = 1, imageReaders = 1)
+        owners.record(id, state)
+        val checkpoint = owners.retirementCheckpoint()
+        owners.beginRetirement(id)
+        assertFalse(owners.retiredSince(checkpoint))
+        owners.remove(id)
+        assertTrue(owners.retiredSince(checkpoint))
+        val late = owners.newId()
+        owners.record(late, state)
+        assertFalse(owners.retiredSince(checkpoint))
+        owners.remove(late, 1)
+        assertFalse(owners.retiredSince(checkpoint))
+    }
+
     @Test fun queueSurvivesTextureRetirementAndEncoderIsDistinct() {
         val owners = SceneGraphicsOwners()
         val queue = owners.newId()

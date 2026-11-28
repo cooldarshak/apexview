@@ -1488,7 +1488,8 @@ class AppState(
         googleLoading = false; googleHasPlayed = false
         castBusy = false
         bakedCastSession?.receiverRendering = false
-        val pressureOwner = pressurePausedFeed.also { pressurePausedFeed = null }
+        val pressureOwner = pressurePausedFeed
+        if (!preserveBakedRecovery) pressurePausedFeed = null
         castResources.releaseMedia()
         if (resumeLocal && playing && pressureOwner != null && singleDecoderScenePlayer === pressureOwner)
             pressureOwner.player.playWhenReady = true
@@ -1548,6 +1549,7 @@ class AppState(
                 localChosen == local && if (local) localReady && localConnection === connection
                 else receiver != null && googleCastRemoteClient === receiver
             if (same) {
+                pressurePausedFeed = null
                 host.player.playWhenReady = true
                 prepareBakedCast(selection, recovering = true)
                 if (castBusy) return@launch
