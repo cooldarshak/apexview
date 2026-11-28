@@ -38,16 +38,18 @@ internal class SceneAsyncTextureLatch private constructor(
     /** A fault of the optional independent path, not of the decoder or DRM. */
     class Fault(cause: Exception) : IllegalStateException("Independent texture latch failed", cause)
 
-    private val lock = Any()
-    private var closed = false
-    private var faulted = false
-    private var image = false
+    private val access = SceneLatchAccess()
+    private val closed get() = access.closed
+    @Volatile private var faulted = false
+    @Volatile private var image = false
+    private fun <T : Any> renderAccess(block: () -> T): T =
+        access.render(1_000L, block) ?: throw Fault(IllegalStateException("Decoder latch owner did not respond"))
     private var discardedAtNs = Long.MIN_VALUE
     private var acquired: EGLSync? = null
     private var sampled: EGLSync? = null
     private val matrix = FloatArray(16)
     private var latchedAt = 0L
-    private var notificationPosted = false
+    private val notificationPosted = java.util.concurrent.atomic.AtomicBoolean()
     private var ingress: SceneDecoderIngress? = null
     private var pending = 0L
     private var first = 0L
@@ -69,21 +71,18 @@ internal class SceneAsyncTextureLatch private constructor(
     data class Stats(val notifications: Long, val latches: Long, val coalesced: Long,
                      val maxWaitNs: Long, val regressions: Long, val fenceWaits: Long,
                      val maxFenceWaitNs: Long, val fenceWaitTotalNs: Long)
-    fun takeStats(): Stats = synchronized(lock) {
+    fun takeStats(): Stats? = access.render(0L) {
         Stats(notifications, latches, coalesced, maxWaitNs, regressions, fenceWaits, maxFenceWaitNs, fenceWaitTotalNs).also {
             notifications = 0L; latches = 0L; coalesced = 0L; maxWaitNs = 0L; regressions = 0L
             fenceWaits = 0L; maxFenceWaitNs = 0L; fenceWaitTotalNs = 0L
         }
     }
-    private var report: ((Event) -> Unit)? = null
-    private var signal: (() -> Unit)? = null
-    private var failure: ((Exception) -> Unit)? = null
+    @Volatile private var report: ((Event) -> Unit)? = null
+    @Volatile private var signal: (() -> Unit)? = null
+    @Volatile private var failure: ((Exception) -> Unit)? = null
     private val notifyRender = Runnable {
-        val callback = synchronized(lock) {
-            notificationPosted = false
-            if (closed || faulted || !image) null else signal
-        }
-        callback?.invoke()
+        notificationPosted.set(false)
+        if (!closed && !faulted && image) signal?.invoke()
     }
     private val retry = Runnable { retryPosted = false; latch() }
 
@@ -111,9 +110,9 @@ internal class SceneAsyncTextureLatch private constructor(
     private fun latch() {
         if (pending == 0L) return
         try {
-            val event = synchronized(lock) {
-                if (closed || faulted) return
-                if (last <= discardedAtNs) { pending = 0L; retrySince = 0L; return }
+            val event = access.worker {
+                if (closed || faulted) return@worker null
+                if (last <= discardedAtNs) { pending = 0L; retrySince = 0L; return@worker null }
                 sampled?.let { fence ->
                     when (EGL15.eglClientWaitSync(display, fence, 0, 0L)) {
                         EGL15.EGL_TIMEOUT_EXPIRED -> {
@@ -122,7 +121,7 @@ internal class SceneAsyncTextureLatch private constructor(
                             check(now - retrySince < 1_000_000_000L) { "GPU sampling fence did not complete" }
                             retryPosted = worker.postDelayed(retry, 1L)
                             check(retryPosted)
-                            return
+                            return@worker null
                         }
                         EGL15.EGL_CONDITION_SATISFIED -> {
                             check(EGL15.eglDestroySync(display, fence))
@@ -157,26 +156,21 @@ internal class SceneAsyncTextureLatch private constructor(
                     lastTimestampNs = timestamp
                 }
                 Event(pending, first, last, timestamp, started, latchedAt).also { pending = 0L }
-            }
-            report?.invoke(event)
-            synchronized(lock) {
-                if (!closed && !faulted && !notificationPosted) {
-                    notificationPosted = render.post(notifyRender)
-                }
+            } ?: return
+            if (!closed) report?.invoke(event)
+            if (!closed && !faulted && notificationPosted.compareAndSet(false, true)) {
+                if (!render.post(notifyRender)) notificationPosted.set(false)
             }
         } catch (error: Exception) {
-            synchronized(lock) { faulted = true }
-            render.post {
-                val callback = synchronized(lock) { if (closed) null else failure }
-                callback?.invoke(Fault(error))
-            }
+            faulted = true
+            render.post { if (!closed) failure?.invoke(Fault(error)) }
         }
     }
 
     /** Render context only; never include eglSwapBuffers in draw. */
-    fun sample(transform: FloatArray, draw: () -> Unit): Long = synchronized(lock) {
+    fun sample(transform: FloatArray, draw: () -> Unit): Long = renderAccess {
         if (closed || faulted) throw Fault(IllegalStateException("Independent decoder texture is unavailable"))
-        if (!image) return@synchronized 0L
+        if (!image) return@renderAccess 0L
         try {
             acquired?.let { check(EGL15.eglWaitSync(display, it, 0)) { "GPU acquire wait failed" } }
         } catch (error: Exception) {
@@ -203,16 +197,13 @@ internal class SceneAsyncTextureLatch private constructor(
     /** Preserve fences when invalidating a source epoch. A newly latched
      * image is required before the next output-ready acknowledgement. */
     fun discard() {
-        synchronized(lock) { image = false; discardedAtNs = System.nanoTime() }
+        renderAccess { image = false; discardedAtNs = System.nanoTime() }
     }
 
     override fun close() {
-        synchronized(lock) {
-            if (closed) return
-            closed = true
-            // A retired worker must not keep the viewer/host callbacks alive.
-            report = null; signal = null; failure = null
-        }
+        if (!access.beginClose()) return
+        // Invalidate callbacks without acquiring the vendor-held image lock.
+        report = null; signal = null; failure = null
         val outerSteps = SceneReleaseSteps { name, error ->
             android.util.Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
         }
@@ -233,14 +224,16 @@ internal class SceneAsyncTextureLatch private constructor(
         val ledger = SceneGraphicsOwners.process
         var quarantinedId: Long? = null
         var completed = false
+        val fenceDeadlineNs = System.nanoTime() + 15_000_000_000L
         val task = object : Runnable {
             override fun run() {
                 try {
-                    val fence = sampled
-                    if (fence != null) {
+                    for (fence in listOfNotNull(sampled, acquired)) {
                         when (EGL15.eglClientWaitSync(display, fence, 0, 250_000_000L)) {
                             EGL15.EGL_TIMEOUT_EXPIRED -> {
                                 // Never release the BufferQueue image on a timeout.
+                                // Bound polling; preserve unresolved ownership on terminal failure.
+                                check(System.nanoTime() < fenceDeadlineNs) { "GPU retirement deadline exceeded" }
                                 check(worker.postDelayed(this, 25L))
                                 return
                             }
