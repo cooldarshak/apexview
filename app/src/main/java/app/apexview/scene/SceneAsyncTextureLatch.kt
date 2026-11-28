@@ -13,6 +13,7 @@ import android.os.HandlerThread
 import android.os.Process
 import android.util.Log
 import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 
 /**
  * One decoder texture, two EGL command streams. The decoder's SurfaceTexture
@@ -41,6 +42,7 @@ internal class SceneAsyncTextureLatch private constructor(
     private var closed = false
     private var faulted = false
     private var image = false
+    private var discardedAtNs = Long.MIN_VALUE
     private var acquired: EGLSync? = null
     private var sampled: EGLSync? = null
     private val matrix = FloatArray(16)
@@ -111,6 +113,7 @@ internal class SceneAsyncTextureLatch private constructor(
         try {
             val event = synchronized(lock) {
                 if (closed || faulted) return
+                if (last <= discardedAtNs) { pending = 0L; retrySince = 0L; return }
                 sampled?.let { fence ->
                     when (EGL15.eglClientWaitSync(display, fence, 0, 0L)) {
                         EGL15.EGL_TIMEOUT_EXPIRED -> {
@@ -200,7 +203,7 @@ internal class SceneAsyncTextureLatch private constructor(
     /** Preserve fences when invalidating a source epoch. A newly latched
      * image is required before the next output-ready acknowledgement. */
     fun discard() {
-        synchronized(lock) { image = false }
+        synchronized(lock) { image = false; discardedAtNs = System.nanoTime() }
     }
 
     override fun close() {
@@ -220,32 +223,73 @@ internal class SceneAsyncTextureLatch private constructor(
         worker.removeCallbacksAndMessages(null)
         // No more renderer sampling can occur. Wait for the last submitted
         // sampling fence before retiring the decoder image on its owner.
-        val retire = FutureTask<Unit> {
-            val steps = SceneReleaseSteps { name, error ->
-                android.util.Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
-            }
-            steps.run("sample-fence-wait") {
-                sampled?.let {
-                    check(EGL15.eglClientWaitSync(display, it, 0, 5_000_000_000L) ==
-                        EGL15.EGL_CONDITION_SATISFIED) { "GPU texture retirement fence timed out" }
+        // Hold an independent EGL display lease while the worker retires. If
+        // the driver stalls, parent teardown can finish without terminating
+        // the display or deleting the shared texture under this worker.
+        val lease = SceneEglDisplays.acquire()
+        check(lease.display == display)
+        val retired = java.util.concurrent.CompletableFuture<Unit>()
+        val retirementLock = Any()
+        val ledger = SceneGraphicsOwners.process
+        var quarantinedId: Long? = null
+        var completed = false
+        val task = object : Runnable {
+            override fun run() {
+                try {
+                    val fence = sampled
+                    if (fence != null) {
+                        when (EGL15.eglClientWaitSync(display, fence, 0, 250_000_000L)) {
+                            EGL15.EGL_TIMEOUT_EXPIRED -> {
+                                // Never release the BufferQueue image on a timeout.
+                                check(worker.postDelayed(this, 25L))
+                                return
+                            }
+                            EGL15.EGL_CONDITION_SATISFIED -> Unit
+                            else -> error("GPU texture retirement fence failed")
+                        }
+                    }
+                    val steps = SceneReleaseSteps { name, error ->
+                        Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
+                    }
+                    steps.run("sample-fence-destroy") { sampled?.let { check(EGL15.eglDestroySync(display, it)) } }
+                    steps.run("acquire-fence-destroy") { acquired?.let { check(EGL15.eglDestroySync(display, it)) } }
+                    sampled = null; acquired = null
+                    steps.run("surface-texture") { frames.release() }
+                    steps.run("egl-unbind") { check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
+                    steps.run("egl-context") { check(EGL14.eglDestroyContext(display, context)) }
+                    steps.run("egl-thread") { check(EGL14.eglReleaseThread()) }
+                    steps.run("egl-display") { lease.close() }
+                    synchronized(retirementLock) {
+                        completed = true
+                        quarantinedId?.let { ledger.remove(it, steps.failedCount) }
+                    }
+                    check(steps.failedCount == 0) { "Unverified latch retirement: ${steps.failedCount} steps" }
+                    retired.complete(Unit)
+                    thread.quitSafely()
+                } catch (error: Exception) {
+                    // A failed fence cannot authorize image release. Keep this
+                    // worker/context/lease alive until process shutdown rather
+                    // than pretend a failed wait completed the GPU commands.
+                    retired.completeExceptionally(error)
                 }
             }
-            steps.run("sample-fence-destroy") { sampled?.let { check(EGL15.eglDestroySync(display, it)) } }
-            steps.run("acquire-fence-destroy") { acquired?.let { check(EGL15.eglDestroySync(display, it)) } }
-            sampled = null; acquired = null
-            steps.run("surface-texture") { frames.release() }
-            steps.run("egl-unbind") { check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
-            steps.run("egl-context") { check(EGL14.eglDestroyContext(display, context)) }
-            steps.run("egl-thread") { check(EGL14.eglReleaseThread()) }
-            check(steps.failedCount == 0) { "Unverified latch retirement: ${steps.failedCount} steps" }
+        }
+        fun quarantine() = synchronized(retirementLock) {
+            if (!completed && quarantinedId == null) {
+                val id = ledger.newId()
+                quarantinedId = id
+                ledger.record(id, SceneGraphicsOwners.Owner("LATCH_RETIRING", 0, 0,
+                    1, 0, 1, 0, 0, 0, 0))
+                ledger.beginRetirement(id)
+            }
         }
         try {
-            check(worker.post(retire)) { "Decoder latch retirement queue closed" }
-            retire.get()
-        } finally {
-            thread.quitSafely()
-            thread.join()
+            check(worker.post(task)) { "Decoder latch retirement queue closed" }
+            retired.get(5L, TimeUnit.SECONDS)
+        } catch (error: Exception) {
+            quarantine()
+            throw Fault(error)
         }
         check(outerSteps.failedCount == 0) { "Unverified latch callback retirement: ${outerSteps.failedCount} steps" }
     }

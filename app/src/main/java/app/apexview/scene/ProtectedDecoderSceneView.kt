@@ -406,6 +406,9 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
 
     private fun initialize(output: Surface, readinessEpoch: Long, lifetime: Long) {
         destroy()
+        check(SceneGraphicsOwners.process.snapshot().values.none { it.backend == "LATCH_RETIRING" }) {
+            "Previous decoder texture is awaiting GPU retirement; retry playback after it drains"
+        }
         graphicsLifetime = lifetime
         renderEpoch = readinessEpoch
         frameRateOutput = output
@@ -826,7 +829,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         val oldTexture = decoderTexture
         input = null; decoderTexture = null; hasFrame = false
         steps.run("decoder-surface") { oldInput?.release() }
-        steps.run("decoder-async-latch") { independent?.close() }
+        var latchRetired = independent == null
+        steps.run("decoder-async-latch") { independent?.close(); latchRetired = true }
         lastAsyncSubmitted = 0L
         pacing.reset()
         steps.run("decoder-texture") { if (independent == null) oldTexture?.release() }
@@ -846,7 +850,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             }
             if (canDeleteGlObjects) {
                 steps.run("gl-program") { if (program != 0) GLES20.glDeleteProgram(program) }
-                steps.run("gl-texture") { if (texture != 0) GLES20.glDeleteTextures(1, intArrayOf(texture), 0) }
+                steps.run("gl-texture") { if (texture != 0 && latchRetired) GLES20.glDeleteTextures(1, intArrayOf(texture), 0) }
             } else if (program != 0 || texture != 0) {
                 // EGL context destruction reclaims its owned GPU objects.
                 // Do not issue GLES commands against a stale/foreign context.
