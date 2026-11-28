@@ -5132,3 +5132,7 @@ Checkpoint only; all ten workstreams remain one batch. No CI until remaining unc
 - M59 legacy capture scripts stage named configurations and preserve CLI diagnostics. Two-command v2 scripts separately supplied. On-device Perfetto coverage not yet verified.
 - M51/M52 evidence analyzer groups actual nonblocking queue refusals, app graphics-owner lifetime and platform memory; these are not physical queue bytes or frame loss. No vendor codec parameter changes without physical proof.
 - Corrected instrumentation constructor for M53. Android/Rust compiler and physical target validation remain required.
+
+
+### M51–M60 checkpoint handover
+See [Build 919 / M51–M60 engineering checkpoint](handovers/PITWALL_BUILD_919_M51_M60_ENGINEERING_2026-11-28.md). Queue analysis now reads the actual platformGraphicsKiB field. Manual v2 simulated end-to-end named-config export passed; no physical coverage claim. No new build until unresolved unconditional P0 engineering scope is addressed.

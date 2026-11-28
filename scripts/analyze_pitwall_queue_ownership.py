@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """M51/M52: summarize actual queue refusals and graphics ownership, not inferred allocation bytes."""
 import argparse
-import collections
 import json
 import re
 from pathlib import Path
@@ -55,9 +54,9 @@ def analyze(lines):
         elif "SCENE_DECODER_INGRESS " in line:
             ingress += int(f.get("notifications", 0))
             coalesced += int(f.get("coalesced", 0))
-        elif "platformGraphicsKb" in f:
+        elif "platformGraphicsKiB" in f:
             try:
-                samples.append((int(f["platformGraphicsKb"]), int(f.get("sceneGraphicsOwners", -1))))
+                samples.append((int(f["platformGraphicsKiB"]), int(f.get("sceneGraphicsOwners", -1))))
             except ValueError:
                 pass
     return {"queues": sorted(queues.values(), key=lambda q: -q["events"]),

@@ -18,9 +18,9 @@ start)
   printf 'engine=%s startPid=%s\n' "$engine" "$pid" > "$dest/$base-ownership.txt"
   dumpsys package "$pkg" | grep -E 'versionName=|versionCode=|pkgFlags=' >> "$dest/$base-ownership.txt" || true
   dumpsys meminfo "$pkg" >> "$dest/$base-ownership.txt"
-  perfetto --query > "$dest/$base-producers.txt"
+  perfetto --query --long > "$dest/$base-producers.txt" 2>&1 || true
   if ! grep -q 'android.heapprofd' "$dest/$base-producers.txt"; then
-    echo "Native heap profiling producer unavailable; share the producer report"; exit 1
+    echo 'Producer not reported; attempting named config, verify actual heap samples after export.'
   fi
   cat > "$dest/$base.cfg" <<'PITWALL_CONFIG'
 # 90-second pre-playback native allocation-site + graphics ownership capture.
