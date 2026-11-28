@@ -166,7 +166,7 @@ class FeedPlayer(
     }
     private fun checkDirectPresentation() {
         val view = directView ?: return
-        if (memoryOwnerRetired || !directPresentation.owns(view)) return
+        if (memoryOwnerRetired || outputCadence.composedSingle || !directPresentation.owns(view)) return
         val eligible = directLifecycle.surface != null && player.playWhenReady &&
             player.playbackState == Player.STATE_READY && selectedVideoTrackCount > 0
         when (directLifecycle.recovery.observe(android.os.SystemClock.elapsedRealtime(), eligible)) {
@@ -887,7 +887,7 @@ class FeedPlayer(
                 output: Any,
                 renderTimeMs: Long,
             ) {
-                if (directLifecycle.surface != null && directView != null &&
+                if (!outputCadence.composedSingle && directLifecycle.surface != null && directView != null &&
                     !directLifecycle.acknowledge(output, renderTimeMs)) return
                 firstFrameRendered = true
                 fit.fastStart = false
