@@ -48,7 +48,8 @@ class MemoryGateTest(unittest.TestCase):
             presentation_evidence=self.evidence(name+".csv", "synthetic unit test only"))
 
     def manifest(self, candidate_pss=500):
-        return dict(schema_version=1, pairs=[
+        return dict(schema_version=1, baseline_commit="b"*40, baseline_apk_sha256="d"*64,
+            candidate_commit="a"*40, candidate_apk_sha256="c"*64, pairs=[
             dict(baseline=self.run_data(i,False,530),candidate=self.run_data(i+3,True,candidate_pss))
             for i in range(3)])
 
@@ -76,6 +77,12 @@ class MemoryGateTest(unittest.TestCase):
         manifest=self.manifest()
         manifest["pairs"].pop()
         with self.assertRaisesRegex(ValueError,"three independent"):
+            evaluate(manifest,self.root)
+
+    def test_baseline_cannot_change_between_routes_or_repetitions(self):
+        manifest=self.manifest()
+        manifest["pairs"][1]["baseline"]["commit"]="e"*40
+        with self.assertRaisesRegex(ValueError,"fixed baseline"):
             evaluate(manifest,self.root)
 
     def test_profiled_and_unreviewed_do_not_pass(self):

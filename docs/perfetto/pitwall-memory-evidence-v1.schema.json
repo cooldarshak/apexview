@@ -4,7 +4,11 @@
   "type": "object",
   "required": [
     "schema_version",
-    "pairs"
+    "pairs",
+    "baseline_commit",
+    "baseline_apk_sha256",
+    "candidate_commit",
+    "candidate_apk_sha256"
   ],
   "properties": {
     "schema_version": {
@@ -28,6 +32,22 @@
           }
         }
       }
+    },
+    "baseline_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "baseline_apk_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "candidate_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "candidate_apk_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
     }
   },
   "$defs": {

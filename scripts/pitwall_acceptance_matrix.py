@@ -170,6 +170,17 @@ def run(manifest):
     memory = evaluate_memory(data["memory_evidence"], manifest.parent)
     cases = [Case.parse(obj, manifest.parent) for obj in data["runs"]]
     validate_groups(cases)
+    # Every cadence route must have the same physical route represented by
+    # paired memory evidence. The memory identity is also exposed to the
+    # owner-reviewed release gate; build display version is not a Git SHA.
+    def route_key(s):
+        return tuple(s[k] for k in ("device", "content_id", "source_profile",
+                     "decoder_mode", "protection", "delivery", "feed_count",
+                     "display_hz", "display_policy", "speed", "overlay"))
+    memory_routes = {route_key(r["scenario"]) for r in memory["routes"]}
+    for case in cases:
+        if route_key(vars(case)) not in memory_routes:
+            raise ValueError(f"{case.label}: no matching paired memory route")
     records = [evaluate(case) for case in cases]
     # This report never signs a physical gate. Its job is to reject hidden
     # missing evidence and expose regressions for engineering triage.

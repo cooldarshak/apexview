@@ -160,12 +160,19 @@ def evaluate(manifest, root):
     require(manifest.get("schema_version") == 1, "Unknown memory evidence schema")
     pairs = manifest["pairs"]
     require(isinstance(pairs, list) and pairs, "No paired evidence")
+    identity = tuple(manifest.get(k, "") for k in
+                     ("baseline_commit", "baseline_apk_sha256", "candidate_commit", "candidate_apk_sha256"))
+    require(all(isinstance(v, str) for v in identity) and SHA.fullmatch(identity[0]) and
+            DIGEST.fullmatch(identity[1]) and SHA.fullmatch(identity[2]) and DIGEST.fullmatch(identity[3])
+            and identity[0] != identity[2] and identity[1] != identity[3],
+            "Missing distinct fixed baseline and candidate identities")
     groups = {}
     used_logs = set()
     for pair in pairs:
         a, b = pair["baseline"], pair["candidate"]
         require(a["scenario"] == b["scenario"], "Mismatched paired scenario")
-        require(a["commit"] != b["commit"] and a["apk_sha256"] != b["apk_sha256"], "Same build compared")
+        require((a["commit"], a["apk_sha256"], b["commit"], b["apk_sha256"]) == identity,
+                "Run does not match fixed baseline and candidate identities")
         for run in (a, b):
             digest = run["memory_log"]["sha256"]
             require(digest not in used_logs, "Reused memory evidence")
@@ -197,7 +204,9 @@ def evaluate(manifest, root):
         reports.append({"scenario": scenario, "pairs": len(group),
                         "baseline": before, "candidate": after, "issues": sorted(set(reasons))})
     require(any(reference(r["scenario"]) for r in reports), "Missing fixed S22 reference scenario")
-    return {"routes": reports, "issues": sum(bool(r["issues"]) for r in reports),
+    return {"baseline_commit": identity[0], "baseline_apk_sha256": identity[1],
+            "candidate_commit": identity[2], "candidate_apk_sha256": identity[3],
+            "routes": reports, "issues": sum(bool(r["issues"]) for r in reports),
             "physical_release": "OWNER_REVIEW_AND_FULL_DEVICE_MATRIX_REQUIRED"}
 
 

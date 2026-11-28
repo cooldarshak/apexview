@@ -2,6 +2,7 @@
 """M51/M52: summarize actual queue refusals and graphics ownership, not inferred allocation bytes."""
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
@@ -9,7 +10,9 @@ QUEUE = re.compile(r"\[([^\]]+)\]\(id:([^,]+),[^)]*\).*?dequeuedCount:\s*(\d+),\
 REPEAT = re.compile(r"^BUFFER_QUEUE_TIMEOUT repeats=(\d+) last=")
 FIELDS = re.compile(r"(\w+)=([^\s]+)")
 
-def analyze(lines):
+def analyze(lines, active_seconds=None):
+    if active_seconds is not None and (not math.isfinite(active_seconds) or active_seconds <= 0):
+        raise ValueError("Active duration must be positive and finite")
     queues = {}
     owners = {}
     released = 0
@@ -59,7 +62,16 @@ def analyze(lines):
                 samples.append((int(f["platformGraphicsKiB"]), int(f.get("sceneGraphicsOwners", -1))))
             except ValueError:
                 pass
-    return {"queues": sorted(queues.values(), key=lambda q: -q["events"]),
+    for row in queues.values():
+        row["configured_wait_events"] = row["events"] - row["nonblocking"]
+        row["events_per_active_second"] = (row["events"] / active_seconds
+                                           if active_seconds is not None else None)
+        row["nonblocking_per_active_second"] = (row["nonblocking"] / active_seconds
+                                                if active_seconds is not None else None)
+        # mDequeueTimeout is a configured wait limit, not measured blocked time.
+        row["actual_stall_duration_ns"] = "NOT_MEASURED"
+    return {"active_seconds": active_seconds,
+        "queues": sorted(queues.values(), key=lambda q: -q["events"]),
         "owner_creates": created, "owner_releases": released, "owners_at_end": len(owners),
         "owner_peak": owner_peak, "egl_context_peak": max_contexts,
         "decoder_texture_peak": max_textures, "fence_waits": fence_count,
@@ -73,6 +85,8 @@ def analyze(lines):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("log", type=Path)
+    parser.add_argument("--active-seconds", type=float,
+                        help="Duration of the pre-isolated active-playback log interval; omit if unknown")
     args = parser.parse_args()
     with args.log.open(errors="replace") as log:
-        print(json.dumps(analyze(log), indent=2))
+        print(json.dumps(analyze(log, args.active_seconds), indent=2))
