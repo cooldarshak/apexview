@@ -103,6 +103,27 @@ jobs:
           # tied to this exact accepted commit and debug workflow run.
           printf '%s' "$issue" | python3 scripts/validate_pitwall_acceptance.py \
             --sha "$ACCEPTED_SHA" --run "$ACCEPTED_RUN_ID"
+          # Owner-approved evidence is a repository release asset, not a
+          # caller-controlled external URL. Replay the evaluator against actual
+          # log bytes and bind both measured APKs to successful workflow runs.
+          memory_dir="$RUNNER_TEMP/pitwall-memory-evidence"
+          mkdir -p "$memory_dir"/{baseline,candidate}
+          printf '%s' "$issue" | python3 scripts/validate_pitwall_memory_release.py metadata > "$memory_dir/metadata.json"
+          baseline_run="$(jq -er .baseline_run "$memory_dir/metadata.json")"
+          baseline_sha="$(jq -er .baseline_commit "$memory_dir/metadata.json")"
+          asset_id="$(jq -er .asset_id "$memory_dir/metadata.json")"
+          baseline_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$baseline_run")"
+          test "$(jq -r .name <<< "$baseline_json")" = "Android debug APK"
+          test "$(jq -r .conclusion <<< "$baseline_json")" = "success"
+          test "$(jq -r .head_sha <<< "$baseline_json")" = "$baseline_sha"
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$memory_dir/evidence.zip"
+          gh run download "$baseline_run" --name apexview-custom-debug-apk --dir "$memory_dir/baseline"
+          gh run download "$ACCEPTED_RUN_ID" --name apexview-custom-debug-apk --dir "$memory_dir/candidate"
+          python3 scripts/validate_pitwall_memory_release.py verify \
+            --metadata "$memory_dir/metadata.json" --bundle "$memory_dir/evidence.zip" \
+            --baseline-dir "$memory_dir/baseline" --candidate-dir "$memory_dir/candidate" \
+            --candidate-commit "$ACCEPTED_SHA" > "$memory_dir/report.json"
+          echo "Paired physical memory evidence replay passed; owner review still required." >> "$GITHUB_STEP_SUMMARY"
           echo "PITWALL_VERIFIED_DEBUG_RUN_NUMBER=$run_number" >> "$GITHUB_ENV"
           echo "PITWALL_VERSION=1.0.$((run_number * 2 + 1))" >> "$GITHUB_ENV"
           echo "Source, green debug build and recorded acceptance matched." >> "$GITHUB_STEP_SUMMARY"
