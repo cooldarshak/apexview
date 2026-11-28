@@ -96,6 +96,22 @@ class BakedCastSegmentQueueTest {
         assertEquals(1_000_001L, queue.mediaSpanUs)
     }
 
+    @Test fun publicationPressureIncludesMuxOwnerAndAudioHorizon() {
+        val queue = BakedCastSegmentQueue()
+        queue.offerVideo(picture(0, true))
+        queue.offerVideo(picture(1_000_000, true))
+        queue.offerAudio(listOf(sound(0), sound(1_000_000)))
+        val ready = requireNotNull(queue.takeReady())
+        queue.offerVideo(picture(5_000_000, true))
+        assertTrue(queue.pressureHigh())
+        assertEquals(15_000_000L, queue.audioEndLimitUs())
+        queue.finish(ready)
+        assertEquals(16_000_000L, queue.audioEndLimitUs())
+        queue.clear()
+        assertTrue(queue.pressureLow())
+        assertEquals(Long.MAX_VALUE, queue.audioEndLimitUs())
+    }
+
     @Test fun invalidBatchNeverPartiallyEnqueuesAudio() {
         val queue = BakedCastSegmentQueue(maxAudio = 4, maxBytes = 8)
         queue.offerAudio(listOf(sound(0)))

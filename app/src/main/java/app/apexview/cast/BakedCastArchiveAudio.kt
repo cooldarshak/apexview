@@ -45,7 +45,7 @@ internal class BakedCastArchiveAudio(
     }
 
     /** Fetch on IO, not the GL/PixelCopy thread. PTS shares the live scene's zero-based clock. */
-    fun readUntil(positionUs: Long): List<BakedCastTransportStream.Sample> {
+    fun readUntil(positionUs: Long, endLimitUs: Long = Long.MAX_VALUE): List<BakedCastTransportStream.Sample> {
         check(!closed)
         val media = completedPlaylist ?: readPlaylist(playlistUri).also { if (it.hasEndTag) completedPlaylist = it }
         return progress.transaction { output ->
@@ -56,7 +56,14 @@ internal class BakedCastArchiveAudio(
                 val segment = media.segments[index]
                 val start = segment.relativeStartTimeUs
                 if (start >= positionUs) break
-                if (start + segment.durationUs <= progress.nextAudioUs) continue
+                val end = Math.addExact(start, segment.durationUs)
+                if (end <= progress.nextAudioUs) continue
+                // Do not partially consume a fragment: retain the exact audio
+                // cursor until the publisher has freed enough media-time room.
+                if (end > endLimitUs) {
+                    require(segment.durationUs <= 15_000_000L) { "Commentary segment exceeds Cast media window" }
+                    break
+                }
                 require(segment.fullSegmentEncryptionKeyUri == null && segment.drmInitData == null) {
                     "Protected F1 commentary cannot be encoded into a clear Cast stream"
                 }

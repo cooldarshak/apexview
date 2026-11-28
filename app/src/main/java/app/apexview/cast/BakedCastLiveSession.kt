@@ -41,6 +41,11 @@ internal class BakedCastLiveSession(
     private var lastPublicationNs = 0L
     @Volatile var receiverRendering = false
     @Volatile private var receiverBuffering = false
+    private val pressure = BakedProducerPressure()
+    /** Main owner polls this before changing its one existing player's clock.
+     * Pressure is cleared only by publication drain, not by dropping samples. */
+    @Synchronized fun producerPressure(nowMs: Long): BakedProducerPressure.State =
+        if (stopped) BakedProducerPressure.State.RUN else pressure.update(nowMs, pending.pressureHigh(), pending.pressureLow())
     fun updateReceiverBuffering(buffering: Boolean) { receiverBuffering = buffering }
     @Synchronized fun receiverNeedsCapture(): Boolean =
         !stopped && receiverBuffering && pending.publishingBytes == 0L
@@ -103,12 +108,17 @@ internal class BakedCastLiveSession(
                 ensureActive()
                 val request = synchronized(this@BakedCastLiveSession) {
                     if (stopped) return@launch
-                    audio?.let { it to (sourceStartMs * 1000 + pending.latestVideoUs.coerceAtLeast(0) + 5_000_000) }
+                    audio?.let {
+                        val origin = Math.multiplyExact(sourceStartMs, 1000L)
+                        val horizon = Math.addExact(origin, pending.latestVideoUs.coerceAtLeast(0) + 5_000_000L)
+                        val limit = pending.audioEndLimitUs()
+                        Triple(it, horizon, if (limit > Long.MAX_VALUE - origin) Long.MAX_VALUE else origin + limit)
+                    }
                 }
                 if (request == null) { delay(50); continue }
                 // Fetch a short distance ahead of the captured picture, not the entire replay.
                 val samples = try {
-                    request.first.readUntil(request.second).also { consecutiveFailures = 0 }
+                    request.first.readUntil(request.second, request.third).also { consecutiveFailures = 0 }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {

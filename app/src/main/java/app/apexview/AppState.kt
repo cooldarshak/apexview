@@ -214,6 +214,7 @@ class AppState(
     private var castQualityRestartJob: Job? = null
     private var castQualityRestartPending by mutableStateOf(false)
     private var bakedQualityRestartPending by mutableStateOf(false)
+    private var pressurePausedFeed: FeedPlayer? = null
     internal val bakedQualityTransitionActive get() = bakedQualityRestartPending
     val castingActive: Boolean get() = castResources.active
     /** Baked production is not local presentation. */
@@ -1467,7 +1468,10 @@ class AppState(
         googleLoading = false; googleHasPlayed = false
         castBusy = false
         bakedCastSession?.receiverRendering = false
+        val pressureOwner = pressurePausedFeed.also { pressurePausedFeed = null }
         castResources.releaseMedia()
+        if (resumeLocal && playing && pressureOwner != null && singleDecoderScenePlayer === pressureOwner)
+            pressureOwner.player.playWhenReady = true
         castRemoteBuffering = false
         castSceneConfirmed = false
         googleCastLoadedUrl = null
@@ -7665,7 +7669,32 @@ class AppState(
 
     fun syncTick() {
         if (castControllerOnly) {
-            if (bakedCastSession != null) singleDecoderScenePlayer?.player?.volume = 0f
+            bakedCastSession?.let { baked ->
+                val feed = singleDecoderScenePlayer
+                if (feed != null) {
+                    feed.player.volume = 0f
+                    when (baked.producerPressure(android.os.SystemClock.elapsedRealtime())) {
+                        app.apexview.cast.BakedProducerPressure.State.HOLD -> {
+                            if (playing && pressurePausedFeed !== feed) {
+                                pressurePausedFeed = feed
+                                feed.player.playWhenReady = false
+                                android.util.Log.i("PitwallCast", "BAKED_PRODUCER_PRESSURE state=HOLD ${baked.health()}")
+                            }
+                        }
+                        app.apexview.cast.BakedProducerPressure.State.RUN -> {
+                            if (pressurePausedFeed === feed) {
+                                pressurePausedFeed = null
+                                feed.player.playWhenReady = playing
+                                android.util.Log.i("PitwallCast", "BAKED_PRODUCER_PRESSURE state=RESUME ${baked.health()}")
+                            }
+                        }
+                        app.apexview.cast.BakedProducerPressure.State.EXPIRED -> {
+                            baked.captureFailed("Cast publication did not drain after bounded producer pause")
+                            return
+                        }
+                    }
+                }
+            }
             val now = android.os.SystemClock.elapsedRealtime()
             if (DiagnosticLogs.recording && now - lastCastSenderDiagnosticMs >= 5_000L) {
                 lastCastSenderDiagnosticMs = now

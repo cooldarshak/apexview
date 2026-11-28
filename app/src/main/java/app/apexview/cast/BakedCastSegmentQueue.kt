@@ -49,6 +49,27 @@ internal class BakedCastSegmentQueue(
         return if (high < 0) 0 else high - low
     }
     val mediaSpanUs get() = retainedSpanUs()
+    /** Audio may fetch whole CMAF fragments. Never ask it to cross the
+     * retained media window while an older GOP is still owned by the mux. */
+    fun audioEndLimitUs(): Long {
+        var earliest = video.firstOrNull()?.ptsUs ?: Long.MAX_VALUE
+        audio.firstOrNull()?.let { earliest = minOf(earliest, it.ptsUs) }
+        publishing.keys.forEach { ready ->
+            ready.video.firstOrNull()?.let { earliest = minOf(earliest, it.ptsUs) }
+            ready.audio.firstOrNull()?.let { earliest = minOf(earliest, it.ptsUs) }
+        }
+        return if (earliest == Long.MAX_VALUE || earliest > Long.MAX_VALUE - maxRetainedUs) Long.MAX_VALUE
+            else earliest + maxRetainedUs
+    }
+    fun videoBacklogUs(): Long {
+        var earliest = video.firstOrNull()?.ptsUs ?: Long.MAX_VALUE
+        publishing.keys.forEach { ready -> ready.video.firstOrNull()?.let { earliest = minOf(earliest, it.ptsUs) } }
+        return if (earliest == Long.MAX_VALUE) 0L else (latestVideoUs - earliest).coerceAtLeast(0L)
+    }
+    fun pressureHigh(): Boolean = videoBacklogUs() >= 5_000_000L ||
+        videoCount >= maxVideo * 2 / 3 || bytesInFlight >= maxBytes - maxBytes / 4
+    fun pressureLow(): Boolean = videoBacklogUs() <= 2_000_000L &&
+        videoCount <= maxVideo / 3 && bytesInFlight <= maxBytes / 2
     init { require(maxRetainedUs > 0) }
 
     fun offerVideo(sample: BakedCastTransportStream.Sample) {
@@ -136,9 +157,9 @@ internal class BakedCastSegmentQueue(
         while (audio.isNotEmpty() && audio.first().ptsUs < first.ptsUs) remove(audio).bytes.fill(0)
         val commentary = mutableListOf<BakedCastTransportStream.Sample>()
         while (audio.isNotEmpty() && audio.first().ptsUs < boundary.ptsUs) commentary += remove(audio)
-        recordMemory()
         if (commentary.isEmpty()) {
             picture.forEach { it.bytes.fill(0) }
+            recordMemory()
             throw IllegalArgumentException("The Cast segment has no commentary")
         }
         return Ready(picture, commentary, duration).also {
