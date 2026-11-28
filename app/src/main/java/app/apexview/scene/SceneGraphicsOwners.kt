@@ -70,6 +70,10 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         pending.remove(id)
         owners.remove(id)?.let { onChange(id, it, null) }
     }
+    data class RetirementCheckpoint(val ids: Set<Long>, val failures: Long)
+    @Synchronized fun retirementCheckpoint() = RetirementCheckpoint((owners.keys + pending).toSet(), unverifiedRetirements)
+    @Synchronized fun retiredSince(checkpoint: RetirementCheckpoint): Boolean =
+        unverifiedRetirements == checkpoint.failures && checkpoint.ids.none { it in owners || it in pending }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
     @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
         " scenePendingRetirements=${pending.size} sceneUnverifiedRetirements=$unverifiedRetirements sceneFailedRetirementSteps=$failedRetirementSteps scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"

@@ -215,11 +215,15 @@ class AppState(
     private var castQualityRestartPending by mutableStateOf(false)
     private var bakedQualityRestartPending by mutableStateOf(false)
     private var pressurePausedFeed: FeedPlayer? = null
+    private var bakedRecoveryJob: Job? = null
+    internal var bakedRecoveryPending by mutableStateOf(false)
+        private set
+    private var bakedRecoveryUsed = false
     internal val bakedQualityTransitionActive get() = bakedQualityRestartPending
     val castingActive: Boolean get() = castResources.active
     /** Baked production is not local presentation. */
     internal val castControllerOnly: Boolean get() =
-        app.apexview.cast.CastRecoveryPolicy.controllerOnly(castPlaybackHandedOff, bakedCastSession != null, bakedQualityRestartPending)
+        app.apexview.cast.CastRecoveryPolicy.controllerOnly(castPlaybackHandedOff, bakedCastSession != null, bakedQualityRestartPending || bakedRecoveryPending)
     var tvCastingMenuOpen by mutableStateOf(false)
     var castPickerOpen by mutableStateOf(false)
     internal var castVideoOnlyOffer by mutableStateOf(false)
@@ -953,8 +957,14 @@ class AppState(
         castStatus = reason.take(220)
         message = castStatus
     }
-    fun startFullSceneCast() = prepareFullSceneCast(false)
-    fun retryFullSceneCast() = prepareFullSceneCast(castingActive)
+    fun startFullSceneCast() {
+        if (!castBusy && !castingActive) bakedRecoveryUsed = false
+        prepareFullSceneCast(false)
+    }
+    fun retryFullSceneCast() {
+        if (!castBusy) bakedRecoveryUsed = false
+        prepareFullSceneCast(castingActive)
+    }
     private fun prepareFullSceneCast(replace: Boolean, qualityReplacement: Boolean = false) {
         if ((castingActive && !replace) || castBusy) return
         if (castResources.hasRetiredMedia) {
@@ -1169,7 +1179,7 @@ class AppState(
     }
 
     /** Clear archive only. The TV receives one AVC picture with all on-screen overlays already in it. */
-    private fun prepareBakedCast(castTiles: List<Tile>) {
+    private fun prepareBakedCast(castTiles: List<Tile>, recovering: Boolean = false) {
         if (castPlaybackHandedOff) {
             returnCastPlayback()
             message = "Wait for the phone picture to resume, then retry continuous Cast."
@@ -1186,7 +1196,11 @@ class AppState(
             message = "Stop replay recording before starting a continuous Cast stream."
             return
         }
-        if (host.activeVideoDecoderCount != 1 || !host.hasRenderedFirstFrame) {
+        // Recovery has already validated the same archive, source selection and
+        // retired the previous graphics graph. Its private surface may need to
+        // bind before Media3 can render the first frame again.
+        if ((!recovering && (host.activeVideoDecoderCount != 1 || !host.hasRenderedFirstFrame)) ||
+            (recovering && host.activeVideoDecoderCount !in 0..1)) {
             message = "Wait for the single hardware decoder's first picture before casting."
             return
         }
@@ -1244,6 +1258,7 @@ class AppState(
                 host.player.volume = 0f // AAC is supplied independently to the receiver.
                 radioPlayer?.pause()
                 bakedCastSession = next
+                bakedRecoveryPending = false
                 // The visible viewer removes its decoder output before the
                 // private presentation binds the same player. Surface clears
                 // are identity guarded by the renderer, not a second decoder.
@@ -1456,7 +1471,12 @@ class AppState(
         castStatus = reason
         message = reason
     }
-    private fun releaseCastRelay(resumeLocal: Boolean = true, preserveQualityRestart: Boolean = false) {
+    private fun releaseCastRelay(resumeLocal: Boolean = true, preserveQualityRestart: Boolean = false,
+                                 preserveBakedRecovery: Boolean = false) {
+        if (!preserveBakedRecovery) {
+            bakedRecoveryJob?.cancel(); bakedRecoveryJob = null
+            bakedRecoveryPending = false
+        }
         if (!preserveQualityRestart) cancelCastQualityRestart()
         castCoordinator.beginPreparation()
         castCoordinator.endLoad()
@@ -1478,7 +1498,7 @@ class AppState(
         googleLoadId = ""
         googleRenderingAckId = null; googleSettingsAppliedId = null
         googlePendingControls.begin(googleLoadId)
-        if (localConnection == null) app.apexview.cast.local.CastConnectionService.stop(context)
+        if (localConnection == null && !preserveBakedRecovery) app.apexview.cast.local.CastConnectionService.stop(context)
         if (resumeLocal) {
             returnCastPlayback()
             if (settings.nativeRustStitching && !castingActive && !castPlaybackHandedOff)
@@ -1488,6 +1508,53 @@ class AppState(
         } else castPlaybackHandedOff = false
         remoteWallClockBaseMs = null
         castSourceWallClockBaseMs = null
+    }
+    /** Only a confirmed baked route gets one bounded congestion restart. No
+     * retry for authentication, protection, format or initial-start failures. */
+    private fun recoverBakedPressure(old: app.apexview.cast.BakedCastLiveSession) {
+        val host = singleDecoderScenePlayer
+        val archive = host?.archiveSceneSession
+        if (bakedCastSession !== old || bakedRecoveryUsed || !old.receiverRendering ||
+            castBusy || !playing || host == null || archive == null) {
+            old.captureFailed("Cast publication did not drain after bounded producer pause")
+            return
+        }
+        bakedRecoveryUsed = true
+        val selection = tiles.toList()
+        val labels = selection.map { it.id to it.feed.sourceStream.profileLabel }
+        val local = localChosen
+        val connection = localConnection
+        val receiver = googleCastRemoteClient
+        val graphics = app.apexview.scene.SceneGraphicsOwners.process
+        val checkpoint = graphics.retirementCheckpoint()
+        bakedRecoveryPending = true
+        // Keep the authorized source player and foreground service. Do not
+        // create a new encoder while the old graph is still retiring.
+        releaseCastRelay(resumeLocal = false, preserveBakedRecovery = true)
+        val generation = castPreparationGeneration
+        castBusy = true
+        castStatus = "Recovering the TV stream after congestion…"; message = castStatus
+        bakedRecoveryJob = scope.launch {
+            val retired = kotlinx.coroutines.withTimeoutOrNull(10_000L) {
+                if (!old.awaitRetired()) return@withTimeoutOrNull false
+                while (!graphics.retiredSince(checkpoint)) kotlinx.coroutines.delay(50L)
+                true
+            } == true
+            if (generation != castPreparationGeneration) return@launch
+            bakedRecoveryJob = null
+            castBusy = false
+            val same = retired && playing && singleDecoderScenePlayer === host &&
+                host.archiveSceneSession === archive && tiles.map { it.id to it.feed.sourceStream.profileLabel } == labels &&
+                localChosen == local && if (local) localReady && localConnection === connection
+                else receiver != null && googleCastRemoteClient === receiver
+            if (same) {
+                host.player.playWhenReady = true
+                prepareBakedCast(selection, recovering = true)
+                if (castBusy) return@launch
+            }
+            releaseCastRelay()
+            castStatus = "TV stream could not recover safely. Reconnect to Cast."; message = castStatus
+        }
     }
     internal fun forgetLocalCastPeers() {
         stopFullSceneCast()
@@ -7156,6 +7223,7 @@ class AppState(
         else protectedCompositionAudioMaster ?: tiles.firstOrNull()
 
     fun togglePlay() {
+        if (bakedRecoveryPending) releaseCastRelay()
         val bakedWasPlaying = bakedCastSession != null
         playing = !playing
         if (!playing) scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -7592,6 +7660,7 @@ class AppState(
     }
 
     private fun seekToNow(targetMs: Long) {
+        if (bakedRecoveryPending) releaseCastRelay()
         val pendingBakedRestart = playbackWork.castRestartJob?.isActive == true || bakedQualityRestartPending
         cancelCastQualityRestart()
         playbackWork.cancelCastRestart()
@@ -7693,7 +7762,7 @@ class AppState(
                             }
                         }
                         app.apexview.cast.BakedProducerPressure.State.EXPIRED -> {
-                            baked.captureFailed("Cast publication did not drain after bounded producer pause")
+                            recoverBakedPressure(baked)
                             return
                         }
                     }

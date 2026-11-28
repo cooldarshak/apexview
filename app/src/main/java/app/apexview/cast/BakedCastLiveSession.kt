@@ -32,6 +32,8 @@ internal class BakedCastLiveSession(
     private var audio: BakedCastArchiveAudio? = null
     private var sourceStartMs = -1L
     private val firstSegment = CompletableDeferred<Unit>()
+    private val audioRetired = CompletableDeferred<Boolean>()
+    private val publisherRetired = CompletableDeferred<Boolean>()
     private val pending = BakedCastSegmentQueue(nativeRequested = { nativeAudioPreference })
     // A notification is only a wakeup; the bounded queue owns every sample.
     private val publishRequests = Channel<Unit>(Channel.CONFLATED)
@@ -152,7 +154,7 @@ internal class BakedCastLiveSession(
         // worker really exits, never zero its initialization during a read.
         audioJob.invokeOnCompletion {
             val retired = synchronized(this) { audio.also { audio = null } }
-            runCatching { retired?.close() }
+            audioRetired.complete(runCatching { retired?.close() }.isSuccess)
         }
     }
 
@@ -182,6 +184,12 @@ internal class BakedCastLiveSession(
     }
 
     suspend fun awaitPlayable() = firstSegment.await()
+
+    /** A replacement must not overlap a blocked mux or commentary reader. */
+    suspend fun awaitRetired(): Boolean {
+        val audioDone = audioRetired.await()
+        return publisherRetired.await() && audioDone
+    }
 
     fun captureFailed(reason: String) = fail("Visible scene capture: $reason")
 
@@ -215,7 +223,8 @@ internal class BakedCastLiveSession(
         // Cancel first, then close after actual publisher retirement. Calling
         // synchronized HLS close on Main could wait for the complete mux.
         publisherJob.invokeOnCompletion {
-            runCatching { hls.close() }
+            val closed = runCatching { hls.close() }.isSuccess
+            publisherRetired.complete(closed && synchronized(this) { pending.bytesInFlight == 0L })
         }
         publisherJob.cancel()
     }

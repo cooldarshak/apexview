@@ -418,7 +418,7 @@ fun ViewerScreen(app: AppState) {
             }
         val controllerOnly = app.castControllerOnly
         Box(Modifier.fillMaxSize().then(videoTransform)) {
-            if (app.castPlaybackHandedOff || app.externalDisplayActive || app.bakedCastSession != null) {
+            if (app.castPlaybackHandedOff || app.externalDisplayActive || app.bakedCastSession != null || app.bakedRecoveryPending) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Playing on ${if (app.externalDisplayActive) app.externalDisplayName else app.castDeviceName}", style = Type.title2)
