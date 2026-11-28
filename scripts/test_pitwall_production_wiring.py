@@ -40,6 +40,21 @@ class ProductionWiringTests(unittest.TestCase):
             self.assertIn("remove(graphicsOwnerId, steps.failedCount)", contents(base + "scene/" + name))
         self.assertIn("sceneUnverifiedRetirements", contents(base + "scene/SceneGraphicsOwners.kt"))
 
+    def test_receiver_surface_and_independent_tower_generation_wiring(self):
+        base = "app/src/main/java/app/apexview/"
+        receiver = contents(base + "cast/local/PitwallReceiverActivity.kt")
+        self.assertIn("PlayerView.switchTargetView(next, old, replacement)", receiver)
+        self.assertIn("output === surface && renderTimeMs >= standardAttachedAtMs", receiver)
+        self.assertIn("DirectSurfaceRecovery.Action.REBIND", receiver)
+        self.assertIn("if (player !== current || standardOwner?.owns(view) != true)", receiver)
+        self.assertIn('retire("standard-view") { standard?.close() }', receiver)
+        timing = contents(base + "cast/CastTimingReceiver.kt")
+        layer = contents(base + "cast/CastTimingLayer.kt")
+        self.assertIn("towerFrame = null; towerGeometry = null", timing)
+        self.assertIn("towerGeometry = geometry?.takeIf", timing)
+        self.assertIn("val f = state.towerFrame", layer)
+        self.assertIn("state.towerGeometry?.takeIf", layer)
+
     def test_archive_native_publication_and_user_thermal_override(self):
         base = "app/src/main/java/app/apexview/"
         archive = contents(base + "tiled/HevcArchiveVodSession.kt")

@@ -258,8 +258,12 @@ class LiveOverlayWiringTest(unittest.TestCase):
     def test_independent_latch_fault_recovers_only_through_same_protection_renderer(self):
         latch = source("scene/SceneAsyncTextureLatch.kt")
         self.assertIn("throw Fault(error)", latch)
-        self.assertIn("val callback = synchronized(lock) { if (closed) null else failure }", latch)
-        self.assertIn("callback?.invoke(Fault(error))", latch)
+        self.assertIn("render.post { if (!closed) failure?.invoke(Fault(error)) }", latch)
+        self.assertIn("if (!access.beginClose()) return", latch)
+        self.assertIn("access.render(1_000L, block)", latch)
+        self.assertIn("for (fence in listOfNotNull(sampled, acquired))", latch)
+        self.assertIn("check(System.nanoTime() < fenceDeadlineNs)", latch)
+        self.assertIn("quarantine()", latch)
         self.assertIn("report = null; signal = null; failure = null", latch)
         for name in ("SingleDecoderSceneView.kt", "ProtectedDecoderSceneView.kt"):
             actual = source("scene/" + name)
