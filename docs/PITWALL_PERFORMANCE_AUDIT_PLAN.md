@@ -5246,3 +5246,7 @@ handles are cleared; a zero active-owner count is not proof of vendor release.
 Tests cover the failure accounting. This is a source checkpoint only; it does
 not complete all revised M51–M60 unconditional work or verify memory savings.
 No implementation build until remaining scope is complete.
+
+### Latest M51–M60 remaining coding continuation handover (28 November 2026)
+
+Resume from production source checkpoint `3e52b4628e240303e8798776b7fef67ff03ca5f9` using [the remaining coding handover](handovers/PITWALL_BUILD_919_M51_M60_REMAINING_CODING_HANDOVER_2026-11-28.md). It distinguishes the 14-file implementation checkpoint (130/130 Python tests; exact blob verification; no Android/Rust compile or device acceptance) from outstanding unconditional coding and conditional evidence. The authoritative revised M51–M60 strategy above remains the single source of requirements. Continue implementation on this branch; no premature build or official release. Documentation-only revision.
