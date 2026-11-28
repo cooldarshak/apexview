@@ -7147,10 +7147,11 @@ class AppState(
         arranging = false
         mutedAll = false
         playing = true
-        try { radioPlayer?.release() } catch (error: Exception) {
+        var radioReleased = false
+        try { radioPlayer?.release(); radioReleased = true } catch (error: Exception) {
             android.util.Log.w("PitwallPlayback", "TERMINAL_RADIO_RELEASE_FAILED type=${error.javaClass.simpleName}")
         } finally {
-            radioAllocator?.let { Media3MemoryOwners.unregister(it); it.trim() }
+            radioAllocator?.let { Media3MemoryOwners.retire(it, radioReleased) }
             radioAllocator = null
             radioPlayer = null
         }

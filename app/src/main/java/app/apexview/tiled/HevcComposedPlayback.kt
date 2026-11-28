@@ -94,9 +94,9 @@ internal class HevcComposedPlayback(
 
     fun release() {
         if (!releaseGate.beginRelease()) return
-        try { player.release() } finally {
-            try { Media3MemoryOwners.trimFreeBlocks(allocator, 0) }
-            finally { Media3MemoryOwners.unregister(allocator) }
+        var released = false
+        try { player.release(); released = true } finally {
+            Media3MemoryOwners.retire(allocator, released)
         }
     }
 

@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicLongArray
 internal class Media3SourceAllocationLedger {
     enum class Kind { SOURCE_MIXED, ARCHIVE_VIDEO, PROGRAMME_AUDIO_SOURCE, CAPTION_SOURCE, PROTECTED_COMPOSED, RECEIVER_MIXED }
     private val bytes = AtomicLongArray(Kind.entries.size)
+    fun isEmpty(): Boolean = Kind.entries.all { bytes.get(it.ordinal) == 0L }
     fun fields(): String = Kind.entries.joinToString("/") { "${it.name}:${bytes.get(it.ordinal)}" }
 
     fun allocator(delegate: Allocator, kind: Kind): Allocator = object : Allocator {

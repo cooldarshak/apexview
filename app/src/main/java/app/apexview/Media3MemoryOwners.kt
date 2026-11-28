@@ -14,6 +14,9 @@ internal object Media3MemoryOwners {
                      val loads: Media3LoadLedger.Snapshot? = null,
                      val sourceAllocations: Media3SourceAllocationLedger? = null)
     private val owners = java.util.WeakHashMap<DefaultAllocator, Owner>()
+    // Keep the actual allocator (not the player) visible until outstanding blocks retire.
+    private val pendingRetirements = mutableSetOf<DefaultAllocator>()
+    private var unverifiedRetirements = 0L
     private const val ACTIVE_RESERVE_BYTES = 2 * 1024 * 1024
     @Synchronized fun register(allocator: DefaultAllocator, id: String = "other", sourceAllocations: Media3SourceAllocationLedger? = null) {
         owners.putIfAbsent(allocator, Owner(id, sourceAllocations = sourceAllocations))
@@ -25,9 +28,11 @@ internal object Media3MemoryOwners {
     }
     @Synchronized private fun ownerSnapshot() = owners.entries.map { it.key to it.value }
     fun ownerFields(): String {
+        reconcileRetired()
         val entries = ownerSnapshot()
+        val (pending, failures) = synchronized(this) { pendingRetirements.size to unverifiedRetirements }
         val parked = entries.filter { it.second.role == "ARCHIVE_PARKED" }
-        return " media3ParkedOwners=${parked.size} media3ParkedInUseBytes=${parked.sumOf { it.first.totalBytesAllocated.toLong() }} " +
+        return " media3PendingRetirements=$pending media3UnverifiedRetirements=$failures media3ParkedOwners=${parked.size} media3ParkedInUseBytes=${parked.sumOf { it.first.totalBytesAllocated.toLong() }} " +
             "media3OwnersDetail=" + entries.joinToString(",") { (allocator, owner) ->
                 "${owner.id}:${owner.role}:${allocator.totalBytesAllocated}:${owner.videoDecoders}:${owner.audioDecoders}:${owner.items}"
             }.ifEmpty { "NONE" } +
@@ -45,9 +50,47 @@ internal object Media3MemoryOwners {
                     "${load?.otherBytes ?: -1}:${load?.untracked ?: -1}"
             }.ifEmpty { "NONE" }
     }
-    @Synchronized fun unregister(allocator: DefaultAllocator) { owners.remove(allocator) }
+    @Synchronized fun unregister(allocator: DefaultAllocator) {
+        check(allocator !in pendingRetirements)
+        owners.remove(allocator)
+    }
+
+    /** A failed Media3 release must not disappear from the owner count. Only
+     * free blocks are trimmed; still-leased SampleQueue blocks stay charged. */
+    fun retire(allocator: DefaultAllocator, playerReleased: Boolean) {
+        val previous = synchronized(this) { owners[allocator] } ?: return
+        val trim = runCatching { trimFreeBlocks(allocator, 0) }
+        val empty = allocator.totalBytesAllocated == 0 && allocator.unusedBytesAllocated == 0 &&
+            previous.sourceAllocations?.isEmpty() != false
+        val verified = playerReleased && trim.isSuccess && empty
+        synchronized(this) {
+            if (!verified) unverifiedRetirements++
+            if (empty) {
+                pendingRetirements.remove(allocator)
+                owners.remove(allocator)
+            } else {
+                pendingRetirements.add(allocator)
+                owners[allocator] = previous.copy(role = "RETIRE_PENDING")
+            }
+        }
+        if (!verified) android.util.Log.e("PitwallPlayback", "MEDIA3_RETIREMENT_UNVERIFIED owner=${previous.id} released=$playerReleased activeBytes=${allocator.totalBytesAllocated} freeBytes=${allocator.unusedBytesAllocated}")
+    }
+
+    private fun reconcileRetired() {
+        val pending = synchronized(this) { pendingRetirements.toList() }
+        for (allocator in pending) {
+            if (allocator.totalBytesAllocated != 0) continue
+            val source = synchronized(this) { owners[allocator]?.sourceAllocations }
+            if (source?.isEmpty() == false) continue
+            if (runCatching { trimFreeBlocks(allocator, 0) }.isFailure || allocator.unusedBytesAllocated != 0) continue
+            synchronized(this) {
+                if (pendingRetirements.remove(allocator)) owners.remove(allocator)
+            }
+        }
+    }
     @Synchronized private fun current() = owners.keys.toList()
     fun snapshot(): Pair<Int, Long> {
+        reconcileRetired()
         val active = current()
         return active.size to active.sumOf { it.totalBytesAllocated.toLong() }
     }

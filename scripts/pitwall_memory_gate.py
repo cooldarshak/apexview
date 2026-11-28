@@ -21,7 +21,8 @@ CANDIDATE_TERMINAL_FIELDS = ("scenePendingRetirements", "sceneVirtualDisplays", 
     "sceneEncoderInputs", "sceneCaptureTextures", "sceneCaptureQueues", "sceneEglPbuffers",
     "BAKED_QUEUEOwnedBytes", "RELAY_EXCLUSIVEOwnedBytes", "DASH_EXCLUSIVEOwnedBytes",
     "CLEAR_SOURCEOwnedBytes", "PROTECTED_SOURCEOwnedBytes", "ARCHIVE_CACHEOwnedBytes",
-    "SHARED_FRAGMENTOwnedBytes", "media3FreePoolBytes")
+    "SHARED_FRAGMENTOwnedBytes", "media3FreePoolBytes", "media3PendingRetirements")
+CANDIDATE_FAILURE_FIELDS = ("media3UnverifiedRetirements",)
 MATCH = ("device", "firmware", "content_id", "source_profile", "decoder_mode",
          "protection", "delivery", "feed_count", "overlay", "speed",
          "display_policy", "display_hz", "cache_state", "network_profile",
@@ -60,7 +61,7 @@ def artifact(root, item):
 
 
 def read_samples(path, pid, candidate=False):
-    required = tuple(dict.fromkeys((*FIELDS, *(CANDIDATE_TERMINAL_FIELDS if candidate else ()))))
+    required = tuple(dict.fromkeys((*FIELDS, *((*CANDIDATE_TERMINAL_FIELDS, *CANDIDATE_FAILURE_FIELDS) if candidate else ()))))
     rows = []
     with path.open(encoding="utf-8", errors="strict") as source:
         for line in source:
@@ -136,6 +137,8 @@ def evaluate_run(run, root, candidate=False):
                 for r in active + after), "Unverified graphics retirement")
     if candidate:
         owners += CANDIDATE_TERMINAL_FIELDS
+        require(all(r[key] == idle[0][key] for r in active + after for key in CANDIDATE_FAILURE_FIELDS),
+                "Unverified Media3 retirement")
     require(all(r[key] == 0 for r in after for key in owners), "Terminal owner still retained")
     require(all(r["media3ParkedInUseBytes"] == 0 for r in active), "Parked media still allocated")
     def metric(key, divisor):

@@ -2,7 +2,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
-from pitwall_memory_gate import evaluate, evaluate_run, FIELDS, CANDIDATE_TERMINAL_FIELDS
+from pitwall_memory_gate import evaluate, evaluate_run, FIELDS, CANDIDATE_TERMINAL_FIELDS, CANDIDATE_FAILURE_FIELDS
 
 
 class MemoryGateTest(unittest.TestCase):
@@ -26,7 +26,7 @@ class MemoryGateTest(unittest.TestCase):
         rows = []
         for tick in range(0, 810000, 10000):
             active = active_start <= tick <= active_end
-            f = dict.fromkeys((*FIELDS, *(CANDIDATE_TERMINAL_FIELDS if candidate else ())), 0)
+            f = dict.fromkeys((*FIELDS, *((*CANDIDATE_TERMINAL_FIELDS, *CANDIDATE_FAILURE_FIELDS) if candidate else ())), 0)
             if retained and tick >= stop + 120000:
                 f[retained] = 1
             f.update(pssKiB=(pss if active else 100) * 1024,
@@ -108,4 +108,9 @@ class MemoryGateTest(unittest.TestCase):
         run = self.run_data(0, False)
         evaluate_run(run, self.root)
         with self.assertRaisesRegex(ValueError, "counter unavailable"):
+            evaluate_run(run, self.root, candidate=True)
+
+    def test_failed_player_release_cannot_disappear_from_gate(self):
+        run = self.run_data(0, True, retained="media3UnverifiedRetirements")
+        with self.assertRaisesRegex(ValueError, "Unverified Media3 retirement"):
             evaluate_run(run, self.root, candidate=True)

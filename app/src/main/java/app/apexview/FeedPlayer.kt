@@ -1703,12 +1703,15 @@ class FeedPlayer(
         // source first raced in-flight Media3 reads and codec handoff during
         // rapid seeks / transitions. The finally chain still closes every
         // owned source even if a platform player release fails.
+        var playerReleased = false
         try {
-            try { directPresentation.close() } finally { player.release() }
+            try { directPresentation.close() } finally {
+                player.release()
+                playerReleased = true
+            }
         } finally {
             try {
-                Media3MemoryOwners.unregister(playbackAllocator)
-                Media3MemoryOwners.trimFreeBlocks(playbackAllocator, 0)
+                Media3MemoryOwners.retire(playbackAllocator, playerReleased)
             } finally {
                 try { archive?.close() } finally { protectedSource?.release() }
             }

@@ -1063,9 +1063,9 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCadence = null
         receiverDisplayOwner = null
         retire("standard-view") { standard?.close() }
-        retire("player") { previous?.release() }
-        retire("allocator-registration") { previousAllocator?.let { app.apexview.Media3MemoryOwners.unregister(it) } }
-        retire("allocator-trim") { previousAllocator?.let { app.apexview.Media3MemoryOwners.trimFreeBlocks(it, 0) } }
+        var playerReleased = false
+        retire("player") { previous?.release(); playerReleased = true }
+        retire("allocator") { previousAllocator?.let { app.apexview.Media3MemoryOwners.retire(it, playerReleased) } }
         retire("DRM") { previousAuthorization?.close() }
         secureOutput = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
