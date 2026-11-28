@@ -489,6 +489,11 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
         val independent = if (asyncLatchDisabled) null else try {
             SceneAsyncTextureLatch.tryCreate(display, selected, contextGl, texture, protectedOutput, gl)
+        } catch (error: SceneAsyncTextureLatch.BootstrapFault) {
+            // The quarantined worker retains the shared image and display.
+            // Context destruction, not explicit texture deletion, reclaims it.
+            texture = 0
+            throw error
         } catch (error: Exception) {
             Log.w("PitwallGraphics", "Independent latch admission failed; retaining original renderer", error)
             null

@@ -37,6 +37,9 @@ internal class SceneAsyncTextureLatch private constructor(
 ) : AutoCloseable {
     /** A fault of the optional independent path, not of the decoder or DRM. */
     class Fault(cause: Exception) : IllegalStateException("Independent texture latch failed", cause)
+    /** An admission worker may still own the shared image. Never start a
+     * fallback consumer or explicitly delete its texture in this case. */
+    class BootstrapFault(cause: Exception) : IllegalStateException("Texture latch admission unverified", cause)
 
     private val access = SceneLatchAccess()
     private val closed get() = access.closed
@@ -320,6 +323,11 @@ internal class SceneAsyncTextureLatch private constructor(
                     EGL15.eglWaitSync(display, probe, 0)
             } finally { EGL15.eglDestroySync(display, probe) }
             if (!renderFenceWorks) return null
+            val bootstrapLease = SceneEglDisplays.acquire()
+            if (bootstrapLease.display != display) {
+                bootstrapLease.close()
+                error("Unexpected EGL display during latch admission")
+            }
             val thread = HandlerThread("PitwallTextureLatch", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
             val worker = Handler(thread.looper)
             val init = FutureTask<SceneAsyncTextureLatch?> {
@@ -351,19 +359,67 @@ internal class SceneAsyncTextureLatch private constructor(
                     owner
                 } finally {
                     if (!success) {
-                        EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                        if (ctx != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, ctx)
-                        EGL14.eglReleaseThread()
+                        val steps = SceneReleaseSteps { name, error ->
+                            Log.w("PitwallGraphics", "LATCH_BOOTSTRAP_RETIRE_FAILED step=$name", error)
+                        }
+                        steps.run("unbind") { check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
+                        steps.run("context") { if (ctx != EGL14.EGL_NO_CONTEXT) check(EGL14.eglDestroyContext(display, ctx)) }
+                        steps.run("thread") { check(EGL14.eglReleaseThread()) }
+                        if (steps.failedCount > 0) throw BootstrapFault(IllegalStateException("Latch admission cleanup failed"))
                     }
                 }
             }
+            // On timeout the queued task still owns the shared EGL resources.
+            // Its retirement is serialized behind admission on the same worker.
+            // Do not cancel FutureTask (which could lose a successfully created owner).
+            fun quarantineBootstrap(error: Exception): Nothing {
+                val ledger = SceneGraphicsOwners.process
+                val id = ledger.newId()
+                ledger.record(id, SceneGraphicsOwners.Owner("LATCH_RETIRING", 0, 0, 1, 0, 1, 0, 0, 0, 0))
+                ledger.beginRetirement(id)
+                val queued = worker.post {
+                    val steps = SceneReleaseSteps { name, failure ->
+                        Log.w("PitwallGraphics", "LATCH_BOOTSTRAP_RETIRE_FAILED step=$name", failure)
+                    }
+                    steps.run("admission") {
+                        val late = init.get()
+                        if (late != null) {
+                            quarantined[id] = late
+                            steps.run("texture") { late.frames.release() }
+                            steps.run("unbind") { check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
+                            steps.run("context") { check(EGL14.eglDestroyContext(display, late.context)) }
+                            steps.run("thread") { check(EGL14.eglReleaseThread()) }
+                        }
+                    }
+                    if (steps.failedCount == 0) steps.run("display") { bootstrapLease.close() }
+                    if (steps.failedCount == 0) {
+                        quarantined.remove(id)
+                        ledger.remove(id)
+                        thread.quitSafely()
+                    } else ledger.retirementFailure(steps.failedCount)
+                }
+                if (!queued) ledger.retirementFailure()
+                throw BootstrapFault(error)
+            }
+            if (!worker.post(init)) {
+                bootstrapLease.close()
+                thread.quitSafely()
+                return null
+            }
             val owner = try {
-                if (worker.post(init)) init.get() else null
-            } catch (error: Exception) {
+                init.get(5L, TimeUnit.SECONDS)
+            } catch (error: java.util.concurrent.TimeoutException) {
+                quarantineBootstrap(error)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                quarantineBootstrap(error)
+            } catch (error: java.util.concurrent.ExecutionException) {
+                if (error.cause is BootstrapFault) quarantineBootstrap(error)
                 Log.w("ApexviewSingleDecoder", "SCENE_ASYNC_LATCH_UNAVAILABLE protected=$protected", error)
                 null
             }
-            if (owner == null) { thread.quitSafely(); thread.join() }
+            bootstrapLease.close()
+            if (owner == null) thread.quitSafely()
             Log.i("ApexviewSingleDecoder", "SCENE_ASYNC_LATCH enabled=${owner != null} protected=$protected " +
                 "fullFrameCopies=0 extraWindowSurfaces=0 physicalGain=NOT_MEASURED")
             return owner

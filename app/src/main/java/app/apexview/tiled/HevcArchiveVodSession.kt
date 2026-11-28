@@ -394,7 +394,7 @@ internal class HevcArchiveVodSession(
         // Record every foreground request. Only logging misses/slow hits biases the
         // sample and makes a real p95 impossible to calculate from exported logs.
         android.util.Log.i("ApexviewSingleDecoder",
-            "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs")
+            "ARCHIVE_VOD_REQUEST number=$number cached=$wasCached waitMs=$waitMs epoch=$requestEpoch")
         val headroom = nativeBudgetContext?.let { context ->
             runCatching { NativeStitchingDeviceBudget.sample(context) }.getOrNull()
         }
@@ -742,7 +742,7 @@ internal class HevcArchiveVodSession(
                 val mediaMs = groups[number].durationUs / 1000L
                 bufferProduction.record(producerMs, mediaMs, android.os.SystemClock.elapsedRealtime())
                 val memory = cache.memorySnapshot()
-                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs " +
+                android.util.Log.i("ApexviewSingleDecoder", "ARCHIVE_VOD_SEGMENT number=$number fetchMs=$fetchMs epoch=$epoch " +
                     "composeMs=$compositionMs verifyMs=$verificationMs totalMs=${(System.nanoTime() - started) / 1_000_000L} " +
                     "parseMs=${composed.parseMs} rewriteMs=${composed.rewriteMs} packageMs=${composed.packageMs} " +
                     "parseCpuMs=${composed.parseCpuMs} rewriteCpuMs=${composed.rewriteCpuMs} " +

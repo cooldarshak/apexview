@@ -785,12 +785,26 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCadence = cadence
         receiverDisplayOwner = null
         sceneCodecCorrelation = correlation
+        val codecReleaseTiming = CodecReleaseTiming()
+        var lastCodecReleaseLogNs = 0L
         next.setVideoFrameMetadataListener(object : VideoFrameMetadataListener {
             override fun onVideoFrameAboutToBeRendered(
                 presentationTimeUs: Long, releaseTimeNs: Long, format: Format,
                 mediaFormat: MediaFormat?,
             ) {
-                correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, System.nanoTime())
+                val now = System.nanoTime()
+                correlation.onCodecFrame(presentationTimeUs, releaseTimeNs, now)
+                if (!DiagnosticLogs.recording) return
+                codecReleaseTiming.record(presentationTimeUs, releaseTimeNs, now)
+                if (now - lastCodecReleaseLogNs >= 5_000_000_000L) {
+                    val sample = codecReleaseTiming.snapshotAndReset()
+                    Log.i("PitwallReceiver", "RECEIVER_CODEC_RELEASE frames=${sample.frames} " +
+                        "ptsBins13_19_23_30_45_100=${sample.ptsIntervals.compact()} " +
+                        "plannedReleaseBins13_19_23_30_45_100=${sample.plannedReleaseIntervals.compact()} " +
+                        "plannedLeadP95UpperMs=${sample.plannedReleaseLead.percentileUpperMs(95)} " +
+                        "callbacksAfterReleaseTime=${sample.callbacksAfterPlannedRelease} physicalPresentation=NOT_MEASURED")
+                    lastCodecReleaseLogNs = now
+                }
             }
         })
         receiverTrackSelector = selector
@@ -847,6 +861,7 @@ class PitwallReceiverActivity : ComponentActivity() {
                 decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
             ) {
                 if (player !== next) return
+                codecReleaseTiming.resetEpoch()
                 if (direct) directActualInput = (format.width to format.height).takeIf {
                     format.width > 0 && format.height > 0
                 }
@@ -858,6 +873,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onVideoDecoderInitialized(eventTime: AnalyticsListener.EventTime, decoderName: String, initializedTimestampMs: Long, initializationDurationMs: Long) {
                 if (player !== next) return
                 correlation.reset()
+                codecReleaseTiming.resetEpoch()
                 decoderCount++
                 updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "VIDEO_DECODER_INIT name=$decoderName active=$decoderCount sources=${scene?.sources ?: 1}")
@@ -866,6 +882,7 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onVideoDecoderReleased(eventTime: AnalyticsListener.EventTime, decoderName: String) {
                 if (player !== next) return
                 correlation.reset()
+                codecReleaseTiming.resetEpoch()
                 decoderCount = (decoderCount - 1).coerceAtLeast(0)
                 updateReceiverMemoryOwner()
                 Log.i("PitwallReceiver", "VIDEO_DECODER_RELEASE name=$decoderName active=$decoderCount")
@@ -901,12 +918,14 @@ class PitwallReceiverActivity : ComponentActivity() {
                 val target = controllerPosition()
                 timingState.onSeek(target + oldPosition.positionMs - newPosition.positionMs, target)
                 correlation.reset()
+                codecReleaseTiming.resetEpoch()
                 sendPlayback()
             }
 
             override fun onPlaybackParametersChanged(parameters: androidx.media3.common.PlaybackParameters) {
                 if (player === next && desiredSpeed != parameters.speed) {
                     correlation.reset()
+                codecReleaseTiming.resetEpoch()
                     desiredSpeed = parameters.speed
                 }
             }
