@@ -151,10 +151,24 @@ class MainActivity : FragmentActivity() {
     override fun onStop() {
         super.onStop()
         app.pauseForBackground()
+        trimOptionalPlaybackMemory()
+    }
+
+    private fun trimOptionalPlaybackMemory() {
+        // A hidden Activity is not a stopped Cast session. Keep its measured
+        // producer horizon and warm native backing available to the process owner.
+        if (!::app.isInitialized || app.retainForCast()) return
+        val idle = app.tiles.isEmpty()
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             Media3MemoryOwners.trimUnused()
-            NativeFragmentLease.trim()
+            if (idle) NativeFragmentLease.trim()
         }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)
+            trimOptionalPlaybackMemory()
     }
 
     /** Back in front: anything that lay over the app (the vote sheet) has gone. */

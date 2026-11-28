@@ -38,7 +38,7 @@ fn atlas_reservation(size: usize, ceiling: usize, idle_limit: usize) -> usize {
     // Physical reader pinning and device admission still decide real reuse.
     const CLASS: usize = 256 * 1024;
     if size < 4 * 1024 * 1024 { return size; }
-    let rounded = size.saturating_add(CLASS - 1) / CLASS * CLASS;
+    let Some(rounded) = size.checked_add(CLASS - 1).map(|n| n / CLASS * CLASS) else { return size; };
     if rounded <= ceiling && rounded <= idle_limit && reusable_capacity(size, rounded) {
         rounded
     } else { size }
@@ -207,7 +207,10 @@ impl Arena {
             // a bypass when we would otherwise attempt near-size atlas growth.
             // Drop the old allocation BEFORE reserving fresh backing so there
             // is no needless overlap/copy of two multi-MiB wiped buffers.
-            if grow.is_some() && self.resize_unhelpful_streak >= MAX_UNHELPFUL_ATLAS_GROWTHS {
+            // The allocator may move realloc. Charge the possible old+new
+            // overlap to the worker ceiling, not merely the final capacity.
+            if grow.as_ref().is_some_and(|b| b.capacity() > ceiling.saturating_sub(size))
+                || (grow.is_some() && self.resize_unhelpful_streak >= MAX_UNHELPFUL_ATLAS_GROWTHS) {
                 self.resize_bypassed=self.resize_bypassed.saturating_add(1);
                 drop(grow.take());
             }
@@ -644,6 +647,12 @@ mod tests {
     }
 
     #[test]
+    fn reservation_rounding_does_not_overflow_address_space() {
+        assert_eq!(atlas_reservation(usize::MAX, usize::MAX, usize::MAX), usize::MAX);
+        assert_eq!(atlas_reservation(usize::MAX - 1, usize::MAX, usize::MAX), usize::MAX - 1);
+    }
+
+    #[test]
     fn measured_atlas_size_class_reuses_nearby_growth_within_original_cap() {
         let mib=1024*1024;
         let mut a=Arena::default();
@@ -761,8 +770,9 @@ mod tests {
         assert!(next.iter().all(|&x|x==0));
         assert!(next.capacity()<=ceiling);
         assert_eq!(a.atlas_fit_small,1);
-        assert_eq!(a.resize_attempts,1);
-        assert_eq!(a.resize_same_address+a.resize_moved+a.resize_failed,1);
+        assert_eq!(a.resize_attempts,0);
+        assert_eq!(a.resize_bypassed,1);
+        assert_eq!(a.resize_same_address+a.resize_moved+a.resize_failed,0);
         assert_eq!(a.owned_allocations,2);
         assert_eq!(a.snapshot()[0],0);
     }

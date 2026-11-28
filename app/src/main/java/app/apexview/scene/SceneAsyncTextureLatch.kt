@@ -204,39 +204,41 @@ internal class SceneAsyncTextureLatch private constructor(
     }
 
     override fun close() {
-        // A listener retirement error cannot strand the EGL owner.
-        runCatching { frames.setOnFrameAvailableListener(null) }
-        runCatching { ingress?.close() }
-        ingress = null
         synchronized(lock) {
             if (closed) return
             closed = true
             // A retired worker must not keep the viewer/host callbacks alive.
             report = null; signal = null; failure = null
         }
+        val outerSteps = SceneReleaseSteps { name, error ->
+            android.util.Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
+        }
+        outerSteps.run("listener") { frames.setOnFrameAvailableListener(null) }
+        outerSteps.run("ingress") { ingress?.close() }
+        ingress = null
         render.removeCallbacks(notifyRender)
         worker.removeCallbacksAndMessages(null)
         // No more renderer sampling can occur. Wait for the last submitted
         // sampling fence before retiring the decoder image on its owner.
         val retire = FutureTask<Unit> {
-            try {
+            val steps = SceneReleaseSteps { name, error ->
+                android.util.Log.w("PitwallGraphics", "LATCH_RETIRE_FAILED step=$name", error)
+            }
+            steps.run("sample-fence-wait") {
                 sampled?.let {
                     check(EGL15.eglClientWaitSync(display, it, 0, 5_000_000_000L) ==
                         EGL15.EGL_CONDITION_SATISFIED) { "GPU texture retirement fence timed out" }
                 }
-            } finally {
-                try {
-                    sampled?.let { EGL15.eglDestroySync(display, it) }
-                    acquired?.let { EGL15.eglDestroySync(display, it) }
-                    sampled = null; acquired = null
-                    frames.release()
-                } finally {
-                    EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
-                        EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
-                    EGL14.eglDestroyContext(display, context)
-                    EGL14.eglReleaseThread()
-                }
             }
+            steps.run("sample-fence-destroy") { sampled?.let { check(EGL15.eglDestroySync(display, it)) } }
+            steps.run("acquire-fence-destroy") { acquired?.let { check(EGL15.eglDestroySync(display, it)) } }
+            sampled = null; acquired = null
+            steps.run("surface-texture") { frames.release() }
+            steps.run("egl-unbind") { check(EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)) }
+            steps.run("egl-context") { check(EGL14.eglDestroyContext(display, context)) }
+            steps.run("egl-thread") { check(EGL14.eglReleaseThread()) }
+            check(steps.failedCount == 0) { "Unverified latch retirement: ${steps.failedCount} steps" }
         }
         try {
             check(worker.post(retire)) { "Decoder latch retirement queue closed" }
@@ -245,6 +247,7 @@ internal class SceneAsyncTextureLatch private constructor(
             thread.quitSafely()
             thread.join()
         }
+        check(outerSteps.failedCount == 0) { "Unverified latch callback retirement: ${outerSteps.failedCount} steps" }
     }
 
     companion object {

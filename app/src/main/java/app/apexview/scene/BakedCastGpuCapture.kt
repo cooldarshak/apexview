@@ -167,8 +167,15 @@ internal class BakedCastGpuCapture(
         val surface: Surface
         private var glRetired = false
         private var queueReleased = false
+        private val retirementSteps = SceneReleaseSteps { name, error ->
+            android.util.Log.w("PitwallCast", "BAKED_GPU_RELEASE_FAILED owner=$role step=$name", error)
+        }
 
         @Synchronized private fun recordGraphicsOwner() {
+            if (glRetired && queueReleased) {
+                SceneGraphicsOwners.process.remove(graphicsOwnerId, retirementSteps.failedCount)
+                return
+            }
             SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
                 role, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 captureTextures = if (glRetired) 0 else 1,
@@ -208,10 +215,12 @@ internal class BakedCastGpuCapture(
         @Synchronized fun retireGl() {
             if (glRetired) return
             glRetired = true
-            try { frames.setOnFrameAvailableListener(null) }
-            finally {
-                try { deleteTextureOnOwner() } finally { recordGraphicsOwner() }
+            retirementSteps.run("listener") { frames.setOnFrameAvailableListener(null) }
+            retirementSteps.run("texture") {
+                check(EGL14.eglGetCurrentContext() == ownerContext) { "Capture texture owner not current" }
+                deleteTextureOnOwner()
             }
+            recordGraphicsOwner()
         }
 
         // SurfaceTexture.release is allowed off the GL thread. No GLES
@@ -219,10 +228,9 @@ internal class BakedCastGpuCapture(
         @Synchronized fun releaseQueue() {
             if (queueReleased) return
             queueReleased = true
-            try { surface.release() }
-            finally {
-                try { frames.release() } finally { recordGraphicsOwner() }
-            }
+            retirementSteps.run("surface") { surface.release() }
+            retirementSteps.run("surface-texture") { frames.release() }
+            recordGraphicsOwner()
         }
 
         override fun close() {

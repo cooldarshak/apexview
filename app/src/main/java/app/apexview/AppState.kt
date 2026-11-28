@@ -6943,7 +6943,7 @@ class AppState(
 
     /** Leaving the app without a pop-out (or closing the pop-out) pauses everything. */
     fun pauseForBackground() {
-        if (castControllerOnly || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
+        if (retainForCast() || localChosen && localConnection != null || externalDisplayActive || externalDisplayRequested && android.os.SystemClock.elapsedRealtime() < externalRequestDeadline) { saveWatch(); return }
         playbackWork.cancelOffer()
         saveWatch()
         if (tiles.isNotEmpty() && playing) togglePlay()
