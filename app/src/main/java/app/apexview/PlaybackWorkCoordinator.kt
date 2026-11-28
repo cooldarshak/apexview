@@ -10,6 +10,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.ensureActive
 
 /** Main-looper playback transitions. Detached capture workers drain before their backing data is reset. */
 internal class PlaybackWorkCoordinator(
@@ -33,6 +35,7 @@ internal class PlaybackWorkCoordinator(
     private var qualityRestartJob: Job? = null
     private var offerJob: Job? = null
     val offerMutex = Mutex()
+    private val offerLifecycleMutex = Mutex()
     var castRestartJob: Job? = null
         private set
     val pendingSeek = ControlSeekBatch()
@@ -85,7 +88,13 @@ internal class PlaybackWorkCoordinator(
     fun launchOffer(scope: CoroutineScope, work: suspend CoroutineScope.() -> Unit) {
         cancelOffer()
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            try { work() } finally { if (offerJob === coroutineContext[Job]) offerJob = null }
+            try {
+                // Cancellation is a request, not proof that the previous offer's IO has drained.
+                offerLifecycleMutex.withLock {
+                    coroutineContext.ensureActive()
+                    if (offerJob === coroutineContext[Job]) work()
+                }
+            } finally { if (offerJob === coroutineContext[Job]) offerJob = null }
         }
         offerJob = job
         job.start()

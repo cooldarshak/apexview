@@ -438,7 +438,7 @@ internal class HevcArchiveVodSession(
                             // Prefetch populates the bounded cache, not a DataSource reader.
                             // Do NOT allocate a second multi-MB ByteArray just to zero it.
                             try {
-                                delivery.obtain(candidate, copyForCaller = false)
+                                delivery.obtain(candidate, copyForCaller = false) { !closed && requestEpoch == productionEpoch }
                             } catch (failure: Exception) {
                                 // The previous runCatching().isFailure silently hid production errors.
                                 // Never include exception messages: URLs can carry F1 credentials.
@@ -497,7 +497,7 @@ internal class HevcArchiveVodSession(
     }
 
     private fun composeAndPublish(number: Int) {
-        checkOpen()
+        val epoch = synchronized(cacheLock) { checkOpen(); productionEpoch }
         require(number in groups.indices) { "Archive segment is outside the finite timeline" }
         val warm = Thread.currentThread().name == "ApexviewVodWarm"
         val admission = if (warm) prefetchAdmission else foregroundAdmission
@@ -512,7 +512,7 @@ internal class HevcArchiveVodSession(
                 val foreground = if (warm) null else SpeculativeMemoryAdmission.process.beginForeground(
                     SpeculativeMemoryAdmission.charge(observed.input, observed.output)
                         ?: SpeculativeMemoryAdmission.sourceForecast(inputs.size, 8 * 1024 * 1024))
-                try { composeAndPublishAdmitted(number, requestedAt) }
+                try { composeAndPublishAdmitted(number, requestedAt, epoch) }
                 finally { foreground?.close() }
             }
         } catch (interrupted: InterruptedException) {
@@ -521,8 +521,11 @@ internal class HevcArchiveVodSession(
         }
     }
 
-    private fun composeAndPublishAdmitted(number: Int, requestedAt: Long) {
-        val epoch = synchronized(cacheLock) { checkOpen(); productionEpoch }
+    private fun composeAndPublishAdmitted(number: Int, requestedAt: Long, epoch: Long) {
+        synchronized(cacheLock) {
+            checkOpen()
+            if (productionEpoch != epoch) throw ArchiveWarmupCancelledException()
+        }
         val started = System.nanoTime()
         val cpuAtStart = android.os.Debug.threadCpuTimeNanos()
         // ART process-wide counters include concurrent player/UI allocation; this is a

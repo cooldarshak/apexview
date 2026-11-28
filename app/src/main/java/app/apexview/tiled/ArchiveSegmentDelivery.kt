@@ -35,10 +35,10 @@ internal class ArchiveSegmentDelivery(
         cache.contains(number)
     }
 
-    fun obtain(number: Int, copyForCaller: Boolean): ByteArray? =
-        if (copyForCaller) obtainInternal(number, true, ::readCopy)
+    fun obtain(number: Int, copyForCaller: Boolean, current: () -> Boolean = { true }): ByteArray? =
+        if (copyForCaller) obtainInternal(number, true, ::readCopy, current) { it.fill(0) }
         else {
-            obtainInternal(number, false, { if (contains(it)) Unit else null })
+            obtainInternal(number, false, { if (contains(it)) Unit else null }, current)
             null
         }
 

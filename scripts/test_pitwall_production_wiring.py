@@ -403,7 +403,7 @@ class ProductionWiringTests(unittest.TestCase):
         self.assertNotIn("resource?.close()", cleanup)
         self.assertIn("ArrayBlockingQueue<Runnable>", session)
         self.assertIn("admission.run(ArchiveFetchDeadline.remainingNs(", session)
-        self.assertIn("composeAndPublishAdmitted(number, requestedAt)", session)
+        self.assertIn("composeAndPublishAdmitted(number, requestedAt, epoch)", session)
         self.assertIn("retirement.run { foregroundAdmission.close() }", session)
         self.assertIn("retirement.run { prefetchAdmission.close() }", session)
         self.assertIn("retirement.run { production.close() }", session)
