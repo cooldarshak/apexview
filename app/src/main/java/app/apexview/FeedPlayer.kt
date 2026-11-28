@@ -549,7 +549,7 @@ class FeedPlayer(
             .build()
         player = ExoPlayer.Builder(context, ThinningRenderersFactory(context, outputCadence))
             .setMediaSourceFactory(sources)
-            .setLoadControl(ArchiveMeasuredLoadControl(loadControl, archiveForwardBuffers))
+            .setLoadControl(ArchiveMeasuredLoadControl(loadControl, archiveForwardBuffers) { playbackAllocator.totalBytesAllocated.toLong() })
             .setTrackSelector(sourceTrackSelector)
             .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context))
             .build()
@@ -1635,6 +1635,8 @@ class FeedPlayer(
         // The owner is terminal; repeated stop/remove/dispose must not release
         // Media3 (and its DRM session manager) a second time.
         if (!releaseGate.beginRelease()) return
+        archiveForwardBuffers.unbindProduction()
+        archiveBufferSourceToken = null
         memoryOwnerRetired = true
         memoryLoads.clearPending()
         outputCadence.composedSingle = false

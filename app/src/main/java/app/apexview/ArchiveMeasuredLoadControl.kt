@@ -19,6 +19,7 @@ import app.apexview.tiled.HevcArchiveVodSession
 internal class ArchiveMeasuredLoadControl(
     private val delegate: LoadControl,
     private val policy: ArchiveForwardBufferPolicy,
+    private val allocatedBytes: () -> Long,
 ) : LoadControl {
     // Media3 1.11.1 uses Java default methods for the PlayerId-aware
     // lifecycle and back-buffer API. Kotlin interface delegation is not
@@ -46,8 +47,7 @@ internal class ArchiveMeasuredLoadControl(
 
     private val period = Timeline.Period()
     private val window = Timeline.Window()
-    private var held = false
-    private var generation = Long.MIN_VALUE
+    private val bufferHold = ArchiveBufferHold()
     private var reportedTarget = -1L
 
     override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean {
@@ -66,21 +66,17 @@ internal class ArchiveMeasuredLoadControl(
             !rebufferRecently && parameters.targetLiveOffsetUs == C.TIME_UNSET)
             policy.target(now, parameters.playbackSpeed) else null
         if (target == null) {
-            held = false
-            generation = Long.MIN_VALUE
+            bufferHold.hold(null, 0L, 0L)
             if (reportedTarget != -1L) {
                 android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_BUFFER_POLICY targetUs=DEFAULT")
                 reportedTarget = -1
             }
             return normal
         }
-        if (generation != target.generation) { generation = target.generation; held = false }
         if (reportedTarget != target.highUs) {
             reportedTarget = target.highUs
             android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_BUFFER_POLICY targetUs=${target.highUs} lowUs=${target.lowUs} basis=MEASURED_SELECTED_CHILDREN_AND_UPSTREAM")
         }
-        if (parameters.bufferedDurationUs >= target.highUs) held = true
-        if (parameters.bufferedDurationUs < target.lowUs) held = false
-        return normal && !held
+        return normal && !bufferHold.hold(target, parameters.bufferedDurationUs, allocatedBytes())
     }
 }

@@ -102,6 +102,19 @@ class ArchiveForwardBufferPolicyTest {
         policy.reset(false)
         assertNull(policy.target(2000, 1f))
     }
+    @Test fun bytePressureNeverCutsBelowMeasuredLowWatermark() {
+        val hold = ArchiveBufferHold()
+        val target = ArchiveForwardBufferPolicy.Target(19_000_000L, 25_000_000L, 1L)
+        val highBytes = 81L * 1024 * 1024
+        assertFalse(hold.hold(target, 18_999_999L, highBytes))
+        assertTrue(hold.hold(target, 20_000_000L, highBytes))
+        assertTrue(hold.hold(target, 20_000_000L, 1L))
+        assertFalse(hold.hold(target, 18_999_999L, highBytes))
+        assertTrue(hold.hold(target, 25_000_000L, 1L))
+        assertFalse(hold.hold(null, 25_000_000L, highBytes))
+        assertFalse(hold.hold(target.copy(generation = 2L), 20_000_000L, 1L))
+    }
+
     @Test fun retiredProductionWindowCannotQualifyAnotherSession() {
         val policy = policy()
         policy.reset(true)

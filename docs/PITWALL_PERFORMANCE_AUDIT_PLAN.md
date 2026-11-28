@@ -5116,3 +5116,12 @@ Build 919 cdd1c6d4 is green. Actual 1.0.1838 S22 Android 16 four-clear-feed test
 M51 P0 BufferQueue release pacing and M52 P0 graphics allocation: investigation remains open; driver queue count is not allocation ownership proof. Preserve protected and clear path. M53 P0 measured buffer policy: retain qualified horizon when paused, do not drop samples or reduce startup/rebuffer minima. M54 P1 distinguish preempt-only scrub hint from committed generation fence; preserve exact user target and Cast/rolling behavior. M55 P1 startup: cold phases offers 1747ms, video init 3088ms, probe 1831ms; warm 263/667/2689ms. Do not skip independent proof. M56 P1 unbind retired archive production window and token, preserve caption and audio selection resets. Heap graph still required to attribute 123 MiB post-stop JVM. M57 P1 native pool size replay on measured 107 extents still favors current 256KiB class over 64/128/512KiB; pinned/disabled misses need verified lifetime/headroom evidence before changing admission. M58 P1 refresh coordination; M59 P1 reliable diagnostics; M60 P2 accelerated output remains last priority. No target marked accepted from source alone.
 
 Checkpoint only; all ten workstreams remain one batch. No CI until remaining unconditional coding scope is resolved. Physical acceptance and missing ownership evidence cannot be substituted by tests.
+
+
+### M51–M60 checkpoint 2 (Build 919 evidence)
+- M53 soft 55 MiB admission only above the measured safe low watermark; default and rebuffer safeguards untouched. Not a hard cap.
+- M55 overlap the same exact declared-clear uniform initialization map with playlist fetches, without extra media fetch or skipping final validation.
+- M56 terminal release removes producer binding and source token; Java retained-object attribution still requires heap graph.
+- M57 bounded two-request capacity history: ideal immediately retired model 80/107 → 88/107, equal peak 9961472 bytes; real reuse still limited by pins and admission. Reset history at pressure trim.
+- M58/M60 reset cadence health on refresh/speed transitions, exclude mixed five-second windows. Do not force display modes or accelerated output.
+- M51/M52 vendor queue/graphics attribution and physical acceptance remain open. No speculative codec knobs or resolution changes.

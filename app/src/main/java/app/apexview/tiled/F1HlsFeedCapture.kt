@@ -278,7 +278,29 @@ internal class F1HlsFeedCapture(factory: DataSource.Factory, private val maximum
         while (true) {
             val selected = if (independent) chooseIndividual(offers, preferredHeights, preferredHeight, minimumHeight)
                 else chooseCommon(offers, preferredHeight, perFeed.size, minimumHeight, manualHeight)
-            val playlists = mapArchiveFeedsBounded(selected) { offer -> runInterruptible { loadMedia(offer) } }
+            val playlists = mapArchiveFeedsBounded(selected) { offer ->
+                runInterruptible {
+                    val playlist = loadMedia(offer)
+                    val first = playlist.segments.firstOrNull()
+                    val map = first?.initializationSegment
+                    // Build 919: up to 3.1s in playlist/init stage. Only overlap
+                    // an identical, clear-declared map that every segment uses.
+                    // The later selected-segment validation and CMAF proof stay mandatory.
+                    if (playlist.hasEndTag && first != null && map != null &&
+                        playlist.segments.all { segment ->
+                            val init = segment.initializationSegment
+                            !segment.hasGapTag && segment.fullSegmentEncryptionKeyUri == null &&
+                                segment.drmInitData == null && init != null &&
+                                init.fullSegmentEncryptionKeyUri == null && init.drmInitData == null &&
+                                init.url == map.url && init.byteRangeOffset == map.byteRangeOffset &&
+                                init.byteRangeLength == map.byteRangeLength
+                        }) {
+                        loadInit(offer, playlist, first)
+                        android.util.Log.i("PitwallArchive", "ARCHIVE_VOD_EXACT_INIT_OVERLAP")
+                    }
+                    playlist
+                }
+            }
             require(playlists.all { it.hasEndTag && it.segments.isNotEmpty() }) {
                 "Archive VOD requires complete HLS replay playlists"
             }

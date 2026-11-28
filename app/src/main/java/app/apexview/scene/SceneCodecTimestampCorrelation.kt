@@ -21,6 +21,10 @@ internal class SceneCodecTimestampCorrelation {
 
     fun allowsAcceleratedOutput(nowNs: Long): Boolean = active && pipelineHealth.allows(nowNs)
 
+    @Synchronized fun resetPipelineHealth(owner: Any?) {
+        if (owner != null && surfaceOwner === owner) pipelineHealth.reset()
+    }
+
     @Synchronized fun recordPipelineWindow(owner: Any?, nowNs: Long, durationNs: Long,
                                             expectedFps: Float, metrics: SceneFramePacing.Snapshot) {
         if (owner == null || surfaceOwner !== owner || !active) return

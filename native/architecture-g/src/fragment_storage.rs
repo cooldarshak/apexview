@@ -44,6 +44,18 @@ fn atlas_reservation(size: usize, ceiling: usize, idle_limit: usize) -> usize {
     } else { size }
 }
 
+// Use at most two previous requests, and only within the original reuse slack,
+// idle allowance and worker ceiling. Pressure/seek clears the history.
+#[cfg(any(target_os = "android", test))]
+fn observed_atlas_reservation(size: usize, ceiling: usize, idle_limit: usize, recent: [usize; 2]) -> usize {
+    let base = atlas_reservation(size, ceiling, idle_limit);
+    if size < 4 * 1024 * 1024 { return base; }
+    let candidate = atlas_reservation(size.max(recent[0]).max(recent[1]), ceiling, idle_limit);
+    if candidate > base && candidate <= ceiling && candidate <= idle_limit && reusable_capacity(size, candidate) {
+        candidate
+    } else { base }
+}
+
 #[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct Arena {
@@ -62,6 +74,7 @@ struct Arena {
     // Clear atlas output only. Never expose this cache to generic allocations.
     atlas_idle: Option<Vec<u8>>,
     atlas_idle_limit: usize,
+    recent_atlas_sizes: [usize; 2],
     owned_miss_empty: u64,
     owned_miss_fit: u64,
     atlas_fit_small: u64,
@@ -137,6 +150,8 @@ impl Arena {
     // OUT of this arena before writing, so it is charged only to the worker.
     fn take_output(&mut self,size:usize,ceiling:usize)->Option<Vec<u8>> {
         if size==0 || size>ceiling || ceiling>crate::bmff::MAX_ATLAS_BYTES {return None;}
+        let reservation = observed_atlas_reservation(size, ceiling, self.atlas_idle_limit, self.recent_atlas_sizes);
+        if self.atlas_idle_limit > 0 { self.recent_atlas_sizes = [self.recent_atlas_sizes[1], size]; }
         if self.atlas_idle.as_ref().is_some_and(|b|b.capacity()<=ceiling && reusable_capacity(size,b.capacity())) ||
             self.best_free(size).is_some_and(|i|self.free[i].capacity()<=ceiling) {
             self.owned_eligible=self.owned_eligible.saturating_add(1);
@@ -213,7 +228,6 @@ impl Arena {
                 self.note_atlas_growth(false);
             }
             let mut b=Vec::new();
-            let reservation = atlas_reservation(size, ceiling, self.atlas_idle_limit);
             if b.try_reserve_exact(reservation).is_err() || b.capacity()>ceiling ||
                 !reusable_capacity(size,b.capacity()) {
                 b=Vec::new();
@@ -361,6 +375,7 @@ impl Arena {
     fn trim_pressure(&mut self) {
         self.discard_through = self.serial;
         self.atlas_idle_limit=0;
+        self.recent_atlas_sizes=[0;2];
         self.trim();
     }
 }
@@ -675,6 +690,29 @@ mod tests {
             assert!(current_hits>=old_hits);
             assert!(current_peak<=old_peak);
         }
+    }
+
+    #[test]
+    fn build_919_observed_capacity_model() {
+        // Exact measured payload sizes + representative 763-byte packet overhead.
+        // Ideal immediate retirement only: cannot model pinning/disabled permits.
+        let sizes=[8575688,8318768,8533272,8414976,8966852,8965696,7701709,8558416,9272516,8183245,9048802,9850798,8940916,8833622,8552024,8397563,8850898,8602898,8395293,8007984,8568742,8600141,8920288,8801335,8314942,8345977,8383064,8581864,9422422,8460879,9189951,8405654,9094863,8479970,8383367,8415481,8753698,8868748,8562506,8405957,8461691,8375390,8480302,8322116,9089322,9280169,8694034,8579519,9062964,8241189,8602038,8900215,8715377,8325457,8325457,9075733,8373865,8423698,9025778,8865967,8756924,8815620,8726426,8666450,9137641,9009088,8423698,9025778,8865967,8756924,8815620,8726426,8666450,8587332,8638294,8601426,9048802,9850798,8940916,8833622,8552024,8397563,8850898,8602898,8395293,8007984,8568742,8600141,8920288,8801335,8314942,8345977,8383064,8581864,9422422,8460879,9189951,8405654,9094863,8479970,8383367,8415481,8753698,8868748,8562506,8405957,8461691];
+        let ceiling=10*1024*1024;
+        let (mut old, mut current, mut old_hits, mut hits, mut old_peak, mut peak)=(0,0,0,0,0,0);
+        let mut recent=[0;2];
+        for media in sizes {
+            let size=media+763;
+            if reusable_capacity(size,old) {old_hits+=1;}
+            else {old=atlas_reservation(size,ceiling,ceiling);}
+            if reusable_capacity(size,current) {hits+=1;}
+            else {current=observed_atlas_reservation(size,ceiling,ceiling,recent);}
+            recent=[recent[1],size];
+            old_peak=old_peak.max(old); peak=peak.max(current);
+            assert!(reusable_capacity(size,current) && current<=ceiling);
+        }
+        assert_eq!((old_hits,hits),(80,88));
+        assert!(peak<=old_peak);
+        assert_eq!(observed_atlas_reservation(8*1024*1024,ceiling,0,[ceiling;2]),8*1024*1024);
     }
 
     #[test]

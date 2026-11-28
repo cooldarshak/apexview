@@ -71,8 +71,14 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         override fun onDisplayRemoved(displayId: Int) = Unit
         override fun onDisplayChanged(displayId: Int) {
             if (rootView.display?.displayId == displayId) {
+                val previousHz = selectedDisplayHz
                 logDisplayMode("mode-changed")
-                gl.post { if (!released) { cadenceGate.reset(); frameRateOutput?.let(::updateFrameRateHint) } }
+                val changedHz = kotlin.math.abs(selectedDisplayHz - previousHz) >= 0.5f
+                if (changedHz) {
+                    mixedPipelineWindow = true
+                    codecCorrelation?.resetPipelineHealth(attachedCodecSurface)
+                }
+                gl.post { if (!released) { if (changedHz) cadenceGate.reset(); frameRateOutput?.let(::updateFrameRateHint) } }
             }
         }
     }
@@ -201,6 +207,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
     @Volatile private var failed = false
     private var rendered = 0L
     private var lastLogNs = 0L
+    @Volatile private var mixedPipelineWindow = true
     private fun pipelineHealthy(): Boolean =
         codecCorrelation?.allowsAcceleratedOutput(System.nanoTime()) == true
     // A one-second GL-looper scheduling probe distinguishes a delayed callback
@@ -300,6 +307,10 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         } else null
         val normalizedSpeed = speed.takeIf { it.isFinite() && it > 0f } ?: 1f
         val speedChanged = playbackSpeed != normalizedSpeed
+        if (speedChanged) {
+            mixedPipelineWindow = true
+            codecCorrelation?.resetPipelineHealth(attachedCodecSurface)
+        }
         playbackSpeed = normalizedSpeed
         scene = nextScene
         logDisplayMode("bind")
@@ -646,7 +657,8 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
             val expectedFps = SceneFrameRatePolicy.composedOutputHint(
                 scene?.sourceFrameRate ?: 0.0, playbackSpeed, selectedDisplayHz,
                 thermalForOutput(), pipelineHealthy())
-            codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
+            if (!mixedPipelineWindow) codecCorrelation?.recordPipelineWindow(input, now, now - lastLogNs, expectedFps, metrics)
+            mixedPipelineWindow = false
             val correlation = codecCorrelation?.snapshotAndReset(input)
             // Five-second trace samples of GL stages, not video scanout.
             Trace.setCounter("PitwallSurfaceSceneLatched5s",
@@ -787,6 +799,7 @@ internal class ProtectedDecoderSceneView(context: Context, private val protected
         frameDemand.reset()
         cadenceGate.reset()
         lastLogNs = 0L
+        mixedPipelineWindow = true
         nextGlProbeExpectedNs = 0L
         steps.run("decoder-listener") { decoderTexture?.setOnFrameAvailableListener(null) }
         steps.run("decoder-ingress") { decoderIngress?.close(); decoderIngress = null }
