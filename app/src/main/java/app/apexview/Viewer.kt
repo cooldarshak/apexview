@@ -161,6 +161,7 @@ import kotlin.math.roundToInt
 
 private const val CHROME_Z = 2e9f
 private const val CHROME_HIDE_MS = 4_000L
+private const val TV_CHROME_HIDE_MS = 5_000L
 private const val POP_OUT_SETTLE_MS = 700L
 /** How far the feeds move down (by shrinking) while the controls are up: the top bar's height. */
 private val CONTROLS_BAND = 56.dp
@@ -265,15 +266,17 @@ fun ViewerScreen(app: AppState) {
             bars.show(WindowInsetsCompat.Type.systemBars())
         }
     }
-    // The controls step back a few seconds after the last touch, unless paused.
-    // helpOpen is a key so opening the overlay cancels a hide already counting down; it used
-    // to fire anyway and take the top bar away from under its labels.
-    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.controlsFocused, app.castControllerOnly) {
-        // Stays up while arranging, or while a TV remote is operating an overlay control.
-        if (!app.castControllerOnly && app.chromeVisible && app.playing && !app.arranging && !app.helpOpen &&
-            !(app.isTv && app.controlsFocused)
-        ) {
-            delay(CHROME_HIDE_MS)
+    // A TV control retains D-pad focus even when the remote is idle. Focus
+    // alone must not suspend auto-hide; onRemoteKey renews the timer on input.
+    val chromeFocusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    LaunchedEffect(app.chromeTouch, app.chromeVisible, app.playing, app.helpOpen, app.arranging, app.castControllerOnly) {
+        if (!app.castControllerOnly && app.chromeVisible && app.playing && !app.arranging && !app.helpOpen) {
+            delay(if (app.isTv) TV_CHROME_HIDE_MS else CHROME_HIDE_MS)
+            if (app.isTv) {
+                app.wantPlayFocus = false
+                chromeFocusManager.clearFocus(force = true)
+                app.controlsFocused = false
+            }
             app.chromeVisible = false
         }
     }

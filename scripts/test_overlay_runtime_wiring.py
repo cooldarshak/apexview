@@ -277,5 +277,25 @@ class LiveOverlayWiringTest(unittest.TestCase):
         self.assertIn("surfaceCreated(holder)", protected)
 
 
+    def test_tv_chrome_idle_timeout_and_featured_tower_width(self):
+        viewer = source("Viewer.kt")
+        app = source("AppState.kt")
+        self.assertIn("TV_CHROME_HIDE_MS = 5_000L", viewer)
+        self.assertIn("CHROME_HIDE_MS = 4_000L", viewer)
+        hide = viewer.split("val chromeFocusManager =", 1)[1].split("LaunchedEffect(Unit)", 1)[0]
+        self.assertIn("app.arranging, app.castControllerOnly", hide)
+        self.assertNotIn("!(app.isTv && app.controlsFocused)", hide)
+        self.assertIn("delay(if (app.isTv) TV_CHROME_HIDE_MS else CHROME_HIDE_MS)", hide)
+        self.assertIn("chromeFocusManager.clearFocus(force = true)", hide)
+        self.assertIn("app.controlsFocused = false", hide)
+        focused = app.split("else if (controlsFocused) {", 1)[1].split("return false", 1)[0]
+        self.assertIn("if (down) showChrome()", focused)
+        self.assertIn("TOWER_MIN_FEATURED_WIDTH_DP = 200f", app)
+        width = app.split("internal fun towerWidthRange", 1)[1].split("internal fun tvTowerWidthFor", 1)[0]
+        self.assertIn("if (tvLandscapeLayout) return Layouts.tvTowerWidthRange(width)", width)
+        self.assertIn("layoutMode == LayoutMode.FEATURED", width)
+        self.assertIn("TOWER_MIN_FEATURED_WIDTH_DP else TOWER_MIN_WIDTH_DP", width)
+
+
 if __name__ == "__main__":
     unittest.main()

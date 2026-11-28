@@ -6263,7 +6263,8 @@ class AppState(
         if (tvLandscapeLayout) return Layouts.tvTowerWidthRange(width)
         val density = context.resources.displayMetrics.density
         val maxWidth = workspace?.w ?: (width - 32f * density).coerceAtLeast(1f)
-        return minOf(TOWER_MIN_WIDTH_DP * density, maxWidth * 0.8f)..maxWidth
+        val minWidthDp = if (layoutMode == LayoutMode.FEATURED) TOWER_MIN_FEATURED_WIDTH_DP else TOWER_MIN_WIDTH_DP
+        return minOf(minWidthDp * density, maxWidth * 0.8f)..maxWidth
     }
 
     internal fun tvTowerWidthFor(width: Float) = width * tvTowerWidthShare
@@ -7214,9 +7215,9 @@ class AppState(
                 if (helpOpen) {
                     if (first) closeHelp()
                 } else if (controlsFocused) {
-                    // The focused slider/map handle owns its D-pad keys even after the chrome
-                    // timeout. Never reinterpret its left/right presses as media seeking.
-                    if (down && !chromeVisible) showChrome()
+                    // Renew idle timeout for focused D-pad navigation as well as clicks.
+                    // Let the focused slider/map handle consume its own keys.
+                    if (down) showChrome()
                     return false
                 } else when (event.keyCode) {
                     android.view.KeyEvent.KEYCODE_DPAD_LEFT -> if (down) remoteSkip(event, -10_000)
@@ -7925,6 +7926,7 @@ class AppState(
         const val TOWER_DEFAULT_WIDTH_DP = 380f
         const val TOWER_DEFAULT_HEIGHT_DP = 720f
         const val TOWER_MIN_WIDTH_DP = 300f
+        const val TOWER_MIN_FEATURED_WIDTH_DP = 200f
         const val TOWER_MIN_HEIGHT_DP = 260f
         const val TOWER_MIN_FONT_SCALE = 0.7f
         const val TOWER_MAX_FONT_SCALE = 1.5f
