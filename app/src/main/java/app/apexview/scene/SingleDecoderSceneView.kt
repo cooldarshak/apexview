@@ -326,6 +326,7 @@ internal class SingleDecoderSceneView(context: Context, independentLatchEnabled:
         castVideoSurface = EGL14.EGL_NO_SURFACE
         try {
             if (old != EGL14.EGL_NO_SURFACE && !EGL14.eglDestroySurface(display, old)) {
+                SceneGraphicsOwners.process.retirementFailure()
                 Log.w("ApexviewSingleDecoder", "SCENE_RELEASE_FAILED owner=$graphicsOwnerId epoch=$graphicsLifetime step=cast-window")
             }
         } finally {

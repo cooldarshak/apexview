@@ -47,6 +47,21 @@ class SceneGraphicsOwnersTest {
         assertTrue(owners.fields().contains("sceneGraphicsBytes=NOT_MEASURED"))
     }
 
+    @Test fun privateDisplayRemainsCountedUntilDrainAcknowledgesRetirement() {
+        val owners = SceneGraphicsOwners()
+        val id = owners.newId()
+        owners.record(id, SceneGraphicsOwners.Owner("Private", 0, 0, 0, 1, 0, 0, 0, 1920, 1080,
+            virtualDisplays = 1, imageReaders = 1))
+        owners.beginRetirement(id)
+        owners.beginRetirement(id)
+        assertTrue(owners.fields().contains("scenePendingRetirements=1"))
+        assertTrue(owners.fields().contains("sceneVirtualDisplays=1"))
+        assertTrue(owners.fields().contains("sceneImageReaders=1"))
+        owners.remove(id)
+        assertTrue(owners.fields().contains("scenePendingRetirements=0"))
+        assertTrue(owners.snapshot().isEmpty())
+    }
+
     @Test fun queueSurvivesTextureRetirementAndEncoderIsDistinct() {
         val owners = SceneGraphicsOwners()
         val queue = owners.newId()

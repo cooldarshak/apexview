@@ -95,6 +95,7 @@ class LiveTimingFeed(
     private var gmtOffset: String? = null
     /** The published circuit shape, used until a lap with its finish line is traced. */
     private var circuitOutline: FloatArray? = null
+    private var publishedGeometry: TrackGeometry? = null
     private val topicCounts = mutableMapOf<String, Int>()
 
     /** A track this session traced for itself, worth keeping for next time. */
@@ -303,6 +304,14 @@ class LiveTimingFeed(
             val line = archive.findStartFinish(shape, states.crossings, built)
             SavedOutline(if (line != null) archive.startAt(shape, line) else shape, line != null)
         }
+        val points = outline?.outline
+        // Keep circuit geometry and retained render layers stable across live
+        // updates. Position/sector data can change without rebuilding shape.
+        val previous = publishedGeometry
+        val geometry = if (previous != null &&
+            (points === previous.outline || points?.contentEquals(previous.outline) == true ||
+                points == null && previous.outline.isEmpty())) previous
+            else TrackGeometry(points ?: FloatArray(0)).also { publishedGeometry = it }
         val status = statusLines.toString()
         return SessionTiming(
             type = sessionType.ifEmpty { ref.title },
@@ -310,7 +319,7 @@ class LiveTimingFeed(
             drivers = archive.parseDrivers(driverList),
             tracks = built,
             states = states.states,
-            outline = outline?.outline ?: FloatArray(0),
+            outline = geometry.outline,
             hasStartFinish = outline?.hasStartFinish == true,
             corners = corners.orEmpty(),
             startUtcMs = start + HEAD_START_MS,
@@ -336,6 +345,7 @@ class LiveTimingFeed(
             clock = runCatching { SessionClock(archive.parseClock(clockLines.toString(), start), parts) }.getOrDefault(SessionClock.NONE),
             live = true,
             weather = weather,
+            geometry = geometry,
         ).also { timing ->
             timing.speeds = speeds.mapValues { it.value.build() }
             timing.positionsFromUtc = built.values.filter { it.endMs > 0 }.minOfOrNull { it.startMs }

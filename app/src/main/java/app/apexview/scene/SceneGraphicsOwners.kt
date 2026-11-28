@@ -14,16 +14,18 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         val captureQueues: Int = 0, val pbuffers: Int = 0,
         val captureWidth: Int = 0, val captureHeight: Int = 0,
         val localBufferWidth: Int = 0, val localBufferHeight: Int = 0,
+        val virtualDisplays: Int = 0, val imageReaders: Int = 0,
     ) {
         val capturePixels: Long get() = captureWidth.toLong() * captureHeight
         val active: Boolean get() = contexts != 0 || windows != 0 || decoderTextures != 0 ||
-            encoderInputs != 0 || captureTextures != 0 || captureQueues != 0 || pbuffers != 0
+            encoderInputs != 0 || captureTextures != 0 || captureQueues != 0 || pbuffers != 0 || virtualDisplays != 0 || imageReaders != 0
         val atlasPixels: Long get() = atlasWidth.toLong() * atlasHeight
         val outputPixels: Long get() = outputWidth.toLong() * outputHeight
         val observedLocalBufferPixels: Long get() = localBufferWidth.toLong() * localBufferHeight
     }
     private val next = AtomicLong()
     private val owners = linkedMapOf<Long, Owner>()
+    private val pending = mutableSetOf<Long>()
     private var unverifiedRetirements = 0L
     private var failedRetirementSteps = 0L
     private var peakOwners = 0
@@ -40,6 +42,7 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         require(owner.encoderInputs in 0..1 && owner.captureTextures in 0..1 && owner.captureQueues in 0..1 &&
             owner.pbuffers in 0..1 && owner.captureWidth >= 0 && owner.captureHeight >= 0)
         require(owner.localBufferWidth >= 0 && owner.localBufferHeight >= 0)
+        require(owner.virtualDisplays in 0..1 && owner.imageReaders in 0..1)
         val previous = owners[id]
         val current = owner.takeIf { it.active }
         if (current == null) owners.remove(id)
@@ -50,20 +53,26 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
         peakWindows = maxOf(peakWindows, owners.values.sumOf { it.windows })
         peakDecoderTextures = maxOf(peakDecoderTextures, owners.values.sumOf { it.decoderTextures })
     }
+    @Synchronized fun beginRetirement(id: Long) {
+        if (id in owners) pending.add(id)
+    }
+    @Synchronized fun retirementFailure(failedSteps: Int = 1) {
+        require(failedSteps > 0)
+        unverifiedRetirements++
+        failedRetirementSteps += failedSteps
+    }
     @Synchronized fun remove(id: Long, failedSteps: Int = 0) {
         require(failedSteps >= 0)
         // Cleared application handles are not proof the driver released them.
         // Keep bounded, process-lifetime scalar failure evidence even if there
         // was no fully initialized owner to register.
-        if (failedSteps > 0) {
-            unverifiedRetirements++
-            failedRetirementSteps += failedSteps
-        }
+        if (failedSteps > 0) retirementFailure(failedSteps)
+        pending.remove(id)
         owners.remove(id)?.let { onChange(id, it, null) }
     }
     @Synchronized fun snapshot(): Map<Long, Owner> = LinkedHashMap(owners)
     @Synchronized private fun diagnosticSnapshot() = LinkedHashMap(owners) to
-        " sceneUnverifiedRetirements=$unverifiedRetirements sceneFailedRetirementSteps=$failedRetirementSteps scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
+        " scenePendingRetirements=${pending.size} sceneUnverifiedRetirements=$unverifiedRetirements sceneFailedRetirementSteps=$failedRetirementSteps scenePeakOwners=$peakOwners scenePeakEglContexts=$peakContexts scenePeakEglWindows=$peakWindows scenePeakDecoderTextures=$peakDecoderTextures scenePeakScope=PROCESS_LIFETIME"
     fun fields(): String {
         val (live, peaks) = diagnosticSnapshot()
         return " sceneGraphicsOwners=${live.size} sceneEglContexts=${live.values.sumOf { it.contexts }}" +
@@ -77,6 +86,7 @@ internal class SceneGraphicsOwners(private val onChange: (Long, Owner?, Owner?) 
             " sceneCaptureTextures=${live.values.sumOf { it.captureTextures }}" +
             " sceneCaptureQueues=${live.values.sumOf { it.captureQueues }}" +
             " sceneEglPbuffers=${live.values.sumOf { it.pbuffers }}" +
+            " sceneVirtualDisplays=${live.values.sumOf { it.virtualDisplays }} sceneImageReaders=${live.values.sumOf { it.imageReaders }}" +
             " sceneCapturePixels=${live.values.sumOf { it.capturePixels }}" +
             " sceneGraphicsDetail=" + live.entries.joinToString(",") { (id, owner) ->
                 "${id}:${owner.backend}:${owner.surfaceEpoch}:${owner.readinessEpoch}:" +

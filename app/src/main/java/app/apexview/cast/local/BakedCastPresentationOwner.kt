@@ -24,6 +24,8 @@ import app.apexview.AppState
 import app.apexview.AppTheme
 import app.apexview.BakedPresentationCanvas
 import app.apexview.cast.BakedCastLiveSession
+import app.apexview.scene.SceneGraphicsOwners
+import app.apexview.scene.SceneReleaseSteps
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +45,13 @@ internal class BakedCastPresentationOwner(
     private var window: ProducerPresentation? = null
     private var tick: Job? = null
     private var closed = false
+    private val graphicsOwnerId = SceneGraphicsOwners.process.newId()
+    private fun recordGraphicsOwner() {
+        SceneGraphicsOwners.process.record(graphicsOwnerId, SceneGraphicsOwners.Owner(
+            "BakedPrivateDisplay", 0, 0, 0, if (window != null) 1 else 0, 0,
+            0, 0, width, height, virtualDisplays = if (display != null) 1 else 0,
+            imageReaders = if (reader != null) 1 else 0))
+    }
 
     fun start() {
         check(!closed && window == null)
@@ -95,6 +104,7 @@ internal class BakedCastPresentationOwner(
                 openSink(width, height)
             }
             display = virtual
+            recordGraphicsOwner()
             val presentation = ProducerPresentation(context, virtual.display, app, width, height)
             window = presentation
             presentation.setOnDismissListener {
@@ -102,6 +112,7 @@ internal class BakedCastPresentationOwner(
                     session.captureFailed("Private Cast display dismissed")
             }
             presentation.show()
+            recordGraphicsOwner()
             tick = scope.launch {
                 while (!closed && app.bakedCastSession === session) {
                     app.syncTick()
@@ -119,13 +130,30 @@ internal class BakedCastPresentationOwner(
         if (closed) return
         closed = true
         tick?.cancel(); tick = null
+        SceneGraphicsOwners.process.beginRetirement(graphicsOwnerId)
+        val steps = SceneReleaseSteps { name, failure ->
+            android.util.Log.w("PitwallCast", "BAKED_PRIVATE_DISPLAY_RELEASE_FAILED step=$name", failure)
+        }
         val oldWindow = window.also { window = null }
-        runCatching { oldWindow?.dismiss() }
-        runCatching { display?.release() }; display = null
-        runCatching { reader?.setOnImageAvailableListener(null, null) }
-        runCatching { reader?.close() }; reader = null
-        thread?.quitSafely(); thread = null
-        android.util.Log.i("PitwallCast", "BAKED_PRIVATE_DISPLAY_STOPPED")
+        val oldDisplay = display.also { display = null }
+        val oldReader = reader.also { reader = null }
+        val oldThread = thread.also { thread = null }
+        steps.run("presentation") { oldWindow?.dismiss() }
+        steps.run("virtual-display") { oldDisplay?.release() }
+        steps.run("image-listener") { oldReader?.setOnImageAvailableListener(null, null) }
+        // Finish any callback already executing on the drain looper before
+        // closing its ImageReader. The scalar owner stays pending until then.
+        fun finish() {
+            steps.run("image-reader") { oldReader?.close() }
+            steps.run("drain-looper") { if (oldThread != null) check(oldThread.quitSafely()) }
+            SceneGraphicsOwners.process.remove(graphicsOwnerId, steps.failedCount)
+            android.util.Log.i("PitwallCast", "BAKED_PRIVATE_DISPLAY_STOPPED failedSteps=${steps.failedCount}")
+        }
+        if (oldReader == null || oldThread == null) finish()
+        else if (!Handler(oldThread.looper).post { finish() }) {
+            steps.run("drain-post") { error("Private sink looper already closed") }
+            finish()
+        }
     }
 
     private class ProducerPresentation(context: Context, display: Display, private val app: AppState,
@@ -148,8 +176,12 @@ internal class BakedCastPresentationOwner(
             setContentView(view)
         }
         override fun dismiss() {
-            try { compose?.disposeComposition(); compose = null; super.dismiss() }
-            finally { owner.registry.currentState = Lifecycle.State.DESTROYED }
+            val view = compose.also { compose = null }
+            try { view?.disposeComposition() }
+            finally {
+                try { super.dismiss() }
+                finally { owner.registry.currentState = Lifecycle.State.DESTROYED }
+            }
         }
     }
 

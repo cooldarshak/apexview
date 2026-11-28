@@ -2529,6 +2529,14 @@ class LiveTimingArchive(private val token: String, private val userAgent: String
 
 /** Grows one car's samples, then freezes them into a [DriverTrack]. */
 class TrackBuilder {
+    // One append-only combined live/backfill backing, not a complete new
+    // history every two-second publication. Previously published prefixes
+    // are immutable; replacing the backfill creates a new backing.
+    private var merged: TrackBuilder? = null
+    private var mergedEarlier: TrackBuilder? = null
+    private var mergedEarlierSize = -1
+    private var mergedPrefix = 0
+    private var mergedLiveSize = 0
     private var t = LongArray(4096)
     private var x = FloatArray(4096)
     private var y = FloatArray(4096)
@@ -2596,26 +2604,62 @@ class TrackBuilder {
      * retain their immutable arrays; resetting references does not mutate them. */
     internal fun retireArchiveBacking() {
         t = LongArray(0); x = FloatArray(0); y = FloatArray(0); size = 0
+        merged = null; mergedEarlier = null; mergedEarlierSize = -1; mergedPrefix = 0; mergedLiveSize = 0
     }
 
     /** As [build], with [earlier]'s samples from before these in front: the archive's part of a live session. */
     fun build(earlier: TrackBuilder?): DriverTrack {
-        if (earlier == null) return build()
+        if (earlier == null) {
+            merged = null; mergedEarlier = null; mergedEarlierSize = -1
+            return build()
+        }
         val first = if (size > 0) t[0] else Long.MAX_VALUE
-        var k = 0
-        while (k < earlier.size && earlier.t[k] < first) k++
-        if (k == 0) return build()
-        val n = k + size
-        val nt = LongArray(n)
-        val nx = FloatArray(n)
-        val ny = FloatArray(n)
-        System.arraycopy(earlier.t, 0, nt, 0, k)
-        System.arraycopy(earlier.x, 0, nx, 0, k)
-        System.arraycopy(earlier.y, 0, ny, 0, k)
-        System.arraycopy(t, 0, nt, k, size)
-        System.arraycopy(x, 0, nx, k, size)
-        System.arraycopy(y, 0, ny, k, size)
-        return DriverTrack(nt, nx, ny, n)
+        // Binary search the exact nonoverlapping archive prefix.
+        var low = 0
+        var high = earlier.size
+        while (low < high) {
+            val mid = low + (high - low) / 2
+            if (earlier.t[mid] < first) low = mid + 1 else high = mid
+        }
+        val k = low
+        if (k == 0) {
+            merged = null; mergedEarlier = null; mergedEarlierSize = -1
+            return build()
+        }
+        val n = Math.addExact(k, size)
+        var backing = merged
+        if (backing == null || mergedEarlier !== earlier || mergedEarlierSize != earlier.size ||
+            mergedPrefix != k || mergedLiveSize > size) {
+            backing = TrackBuilder()
+            backing.t = LongArray(n)
+            backing.x = FloatArray(n)
+            backing.y = FloatArray(n)
+            System.arraycopy(earlier.t, 0, backing.t, 0, k)
+            System.arraycopy(earlier.x, 0, backing.x, 0, k)
+            System.arraycopy(earlier.y, 0, backing.y, 0, k)
+            merged = backing
+            mergedEarlier = earlier
+            mergedEarlierSize = earlier.size
+            mergedPrefix = k
+            mergedLiveSize = 0
+        }
+        if (n > backing.t.size) {
+            // Small amortized slack, rather than doubling a race-long history.
+            val capacity = (n.toLong() + maxOf(256, n / 8)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            backing.t = backing.t.copyOf(capacity)
+            backing.x = backing.x.copyOf(capacity)
+            backing.y = backing.y.copyOf(capacity)
+        }
+        val added = size - mergedLiveSize
+        if (added > 0) {
+            val offset = k + mergedLiveSize
+            System.arraycopy(t, mergedLiveSize, backing.t, offset, added)
+            System.arraycopy(x, mergedLiveSize, backing.x, offset, added)
+            System.arraycopy(y, mergedLiveSize, backing.y, offset, added)
+        }
+        mergedLiveSize = size
+        backing.size = n
+        return backing.build()
     }
 
     /** The points of one lap starting at [start] and its duration, or null if it doesn't close. */
