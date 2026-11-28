@@ -44,7 +44,7 @@ class ProductionWiringTests(unittest.TestCase):
         base = "app/src/main/java/app/apexview/"
         receiver = contents(base + "cast/local/PitwallReceiverActivity.kt")
         self.assertIn("PlayerView.switchTargetView(next, old, replacement)", receiver)
-        self.assertIn("output === surface && renderTimeMs >= standardAttachedAtMs", receiver)
+        self.assertIn("standardLifecycle.acknowledge(output, renderTimeMs)", receiver)
         self.assertIn("DirectSurfaceRecovery.Action.REBIND", receiver)
         self.assertIn("if (player !== current || standardOwner?.owns(view) != true)", receiver)
         self.assertIn('retire("standard-view") { standard?.close() }', receiver)

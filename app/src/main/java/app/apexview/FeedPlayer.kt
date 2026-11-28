@@ -147,11 +147,45 @@ class FeedPlayer(
 
     val player: ExoPlayer
     private val directPresentation = DirectPresentationOwner<androidx.media3.ui.PlayerView>(::transferDirectPresentation)
+    private val directLifecycle = DirectSurfaceLifecycle()
+    private var directView: androidx.media3.ui.PlayerView? = null
     private fun transferDirectPresentation(old: androidx.media3.ui.PlayerView?, next: androidx.media3.ui.PlayerView?) {
         androidx.media3.ui.PlayerView.switchTargetView(player, old, next)
     }
-    internal fun attachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.attach(view)
-    internal fun detachDirectPresentation(view: androidx.media3.ui.PlayerView) = directPresentation.detach(view)
+    internal fun attachDirectPresentation(view: androidx.media3.ui.PlayerView) {
+        if (directPresentation.owns(view) || memoryOwnerRetired) return
+        directLifecycle.attach(view)
+        directPresentation.attach(view)
+        directView = view
+    }
+    internal fun detachDirectPresentation(view: androidx.media3.ui.PlayerView) {
+        if (!directPresentation.owns(view)) return
+        directView = null
+        directLifecycle.close()
+        directPresentation.detach(view)
+    }
+    private fun checkDirectPresentation() {
+        val view = directView ?: return
+        if (memoryOwnerRetired || !directPresentation.owns(view)) return
+        val eligible = directLifecycle.surface != null && player.playWhenReady &&
+            player.playbackState == Player.STATE_READY && selectedVideoTrackCount > 0
+        when (directLifecycle.recovery.observe(android.os.SystemClock.elapsedRealtime(), eligible)) {
+            DirectSurfaceRecovery.Action.NONE -> Unit
+            DirectSurfaceRecovery.Action.REBIND -> {
+                directLifecycle.rebindStarted()
+                try {
+                    directPresentation.detach(view)
+                    directPresentation.attach(view)
+                    Log.w("PitwallVideo", "DIRECT_SURFACE_REBIND feed=$diagnosticId")
+                } catch (_: Exception) {
+                    problem = "Video surface could not be rebound safely"
+                }
+            }
+            DirectSurfaceRecovery.Action.FAILED -> {
+                problem = "Video surface did not render after rebind"
+            }
+        }
+    }
     /** Codec PTS correlation for the real clear/protected scene; no SF assertion. */
     internal val sceneCodecCorrelation = SceneCodecTimestampCorrelation()
     /** Updated to the security level Widevine actually opened, not just the requested setting. */
@@ -853,6 +887,8 @@ class FeedPlayer(
                 output: Any,
                 renderTimeMs: Long,
             ) {
+                if (directLifecycle.surface != null && directView != null &&
+                    !directLifecycle.acknowledge(output, renderTimeMs)) return
                 firstFrameRendered = true
                 fit.fastStart = false
                 val seekAt = pendingSeekAtMs
@@ -1666,6 +1702,7 @@ class FeedPlayer(
 
     /** Rebuilds the diagnostics line. Called on player events and once a second by the tile. */
     fun refresh() {
+        checkDirectPresentation()
         val dropped = player.videoDecoderCounters?.droppedBufferCount ?: 0
         if (dropped >= lastDropped) dropsPerSecond = dropped - lastDropped
         lastDropped = dropped
@@ -1714,7 +1751,10 @@ class FeedPlayer(
         // owned source even if a platform player release fails.
         var playerReleased = false
         try {
-            try { directPresentation.close() } finally {
+            try {
+                directView = null
+                try { directLifecycle.close() } finally { directPresentation.close() }
+            } finally {
                 player.release()
                 playerReleased = true
             }

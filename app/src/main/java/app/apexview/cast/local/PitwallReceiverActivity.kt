@@ -183,18 +183,14 @@ class PitwallReceiverActivity : ComponentActivity() {
     private var desiredVolume = 1f
     private var standardView: PlayerView? = null
     private var standardOwner: DirectPresentationOwner<PlayerView>? = null
-    private val standardRecovery = DirectSurfaceRecovery()
-    private var standardAttachedAtMs = Long.MAX_VALUE
-    private var standardSurface: android.view.Surface? = null
+    private val standardLifecycle = DirectSurfaceLifecycle()
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun attachStandard(current: ExoPlayer, view: PlayerView) {
         if (player !== current) return
         val owner = standardOwner ?: return
         if (owner.owns(view)) return
-        standardRecovery.newTarget()
-        standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
-        standardSurface = (view.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
+        standardLifecycle.attach(view)
         owner.attach(view)
         standardView = view
         setReceiverOutputDisplay(view, view.display?.displayId)
@@ -203,8 +199,7 @@ class PitwallReceiverActivity : ComponentActivity() {
     private fun detachStandard(current: ExoPlayer, view: PlayerView) {
         if (player !== current || standardOwner?.owns(view) != true) return
         standardView = null
-        standardSurface = null
-        standardRecovery.newTarget()
+        standardLifecycle.close()
         setReceiverOutputDisplay(view, null)
         standardOwner?.detach(view)
     }
@@ -214,22 +209,16 @@ class PitwallReceiverActivity : ComponentActivity() {
         val view = standardView ?: return
         val owner = standardOwner ?: return
         if (!owner.owns(view)) return
-        val surface = (view.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
-        if (surface !== standardSurface) {
-            standardSurface = surface
-            standardRecovery.newTarget()
-            standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
-        }
-        val eligible = surface?.isValid == true && current.playWhenReady &&
+        val eligible = standardLifecycle.surface != null && current.playWhenReady &&
             current.playbackState == Player.STATE_READY &&
             current.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
-        when (standardRecovery.observe(android.os.SystemClock.elapsedRealtime(), eligible)) {
+        when (standardLifecycle.recovery.observe(android.os.SystemClock.elapsedRealtime(), eligible)) {
             DirectSurfaceRecovery.Action.NONE -> Unit
             DirectSurfaceRecovery.Action.REBIND -> {
                 // Rebind the same secure/clear target on the same player. No
                 // seek, second codec, new DRM session, or quality change.
                 try {
-                    standardAttachedAtMs = android.os.SystemClock.elapsedRealtime()
+                    standardLifecycle.rebindStarted()
                     owner.detach(view)
                     owner.attach(view)
                     Log.w("PitwallReceiver", "DIRECT_SURFACE_REBIND generation=$generation")
@@ -893,12 +882,9 @@ class PitwallReceiverActivity : ComponentActivity() {
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, output: Any, renderTimeMs: Long) {
                 // For a scene, wait for the GLES output swap, not merely codec output to its texture.
                 val view = standardView
-                val surface = (view?.videoSurfaceView as? android.view.SurfaceView)?.holder?.surface
                 if (player === next && view != null && standardOwner?.owns(view) == true &&
                     (scene == null || surfacePlayback(scene, direct)) &&
-                    surface?.isValid == true && output === surface && renderTimeMs >= standardAttachedAtMs) {
-                    standardSurface = surface
-                    standardRecovery.acknowledge()
+                    standardLifecycle.acknowledge(output, renderTimeMs)) {
                     reportRendering()
                 }
             }
@@ -1060,7 +1046,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         val clearScene = sceneView.also { sceneView = null }
         val protectedScene = protectedSceneView.also { protectedSceneView = null }
         val correlation = sceneCodecCorrelation.also { sceneCodecCorrelation = null }
-        standardView = null; standardSurface = null; standardRecovery.newTarget()
+        standardView = null
         val standard = standardOwner.also { standardOwner = null }
         val previous = player.also { player = null }
         receiverMemorySnapshot = null
@@ -1081,6 +1067,7 @@ class PitwallReceiverActivity : ComponentActivity() {
         receiverCadence?.activeDisplayId = -1
         receiverCadence = null
         receiverDisplayOwner = null
+        retire("standard-lifecycle") { standardLifecycle.close() }
         retire("standard-view") { standard?.close() }
         var playerReleased = false
         retire("player") { previous?.release(); playerReleased = true }
