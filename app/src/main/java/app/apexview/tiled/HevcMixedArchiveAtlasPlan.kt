@@ -175,18 +175,21 @@ internal object HevcMixedArchiveAtlasPlan {
                         val x = left + tile.col; val y = top + tile.row
                         placed[y * columns + x] != null || !valid(tile, x, y)
                     }) continue
-                    val changed = mutableListOf<Int>()
+                    // At most eight rows and eight columns. Use a scalar mask
+                    // rather than allocating a list and boxed integers per search node.
+                    var changed = 0
                     feed.tiles.forEach { tile ->
                         val x = left + tile.col; val y = top + tile.row
                         placed[y * columns + x] = tile
-                        if (colCtbs[x] == 0) { colCtbs[x] = tile.ctbsWide; colPixels[x] = tile.pixelsWide; changed += x }
-                        if (rowCtbs[y] == 0) { rowCtbs[y] = tile.ctbsHigh; rowPixels[y] = tile.pixelsHigh; changed += columns + y }
+                        if (colCtbs[x] == 0) { colCtbs[x] = tile.ctbsWide; colPixels[x] = tile.pixelsWide; changed = changed or (1 shl x) }
+                        if (rowCtbs[y] == 0) { rowCtbs[y] = tile.ctbsHigh; rowPixels[y] = tile.pixelsHigh; changed = changed or (1 shl (columns + y)) }
                     }
                     origin[index] = left to top
                     search(index + 1)
                     origin[index] = null
                     feed.tiles.forEach { tile -> placed[(top + tile.row) * columns + left + tile.col] = null }
-                    changed.forEach { changedIndex ->
+                    for (changedIndex in 0 until columns + rows) {
+                        if (changed and (1 shl changedIndex) == 0) continue
                         if (changedIndex < columns) { colCtbs[changedIndex] = 0; colPixels[changedIndex] = 0 }
                         else { rowCtbs[changedIndex - columns] = 0; rowPixels[changedIndex - columns] = 0 }
                     }

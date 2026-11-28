@@ -183,6 +183,15 @@ pub struct StreamPrefix {
 }
 
 impl StreamPrefix {
+    /// Coded SPS declarations for the diagnostic fixture. Not measured DPB occupancy.
+    pub fn declared_sublayer_ordering(&self) -> &[[u32; 3]] {
+        &self.ordering[..self.max_sub_layers as usize]
+    }
+
+    pub fn coded_ctu_area(&self) -> u64 {
+        u64::from(self.width_in_ctbs) * u64::from(self.height_in_ctbs)
+    }
+
     pub fn parse(nals: [&[u8]; 3]) -> Result<Self, Error> {
         Ok(Self::prefixes(nals)?.0)
     }

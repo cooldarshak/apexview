@@ -98,6 +98,17 @@ pub struct References {
 }
 
 impl References {
+    /// Clear fixture diagnostics only; short-term deltas are relative to POC.
+    pub fn short_term_trace(&self) -> impl Iterator<Item = (i32, bool)> + '_ {
+        self.short.values().iter().map(|r| (r.poc, r.used))
+    }
+
+    /// Long-term entries retain the LSB and signalled MSB-cycle field; the
+    /// latter is not interpreted as a complete absolute reference identity.
+    pub fn long_term_trace(&self) -> impl Iterator<Item = (u32, bool, Option<u32>)> + '_ {
+        self.long.iter().map(|(r, cycle)| (r.poc_lsb, r.used, *cycle))
+    }
+
     pub(crate) fn read(
         bits: &mut Bits<'_>,
         short: &[ShortTerm],

@@ -169,6 +169,18 @@ fn compose(
     .generate(tracks[0].configuration.parameter_sets())
     .unwrap();
     let output = &generated.parameters;
+    // For this independent, complete, side-by-side source placement only,
+    // equality with the sum of coded source areas proves the geometry lower
+    // bound. Never generalize the fixture result to an F1 vendor pool.
+    let source_area: u64 = parameters.iter().map(|p| u64::from(p.prefix.coded_width) * u64::from(p.prefix.coded_height)).sum();
+    let output_area = u64::from(output.prefix.coded_width) * u64::from(output.prefix.coded_height);
+    assert_eq!(output_area, source_area, "fixture contains unnecessary coded padding");
+    for (feed, p) in parameters.iter().enumerate() {
+        println!("HEVC_GEOMETRY fixture={input:?} feed={feed} coded={}x{} ctuArea={} declaredOrdering={:?}",
+            p.prefix.coded_width, p.prefix.coded_height, p.prefix.coded_ctu_area(), p.prefix.declared_sublayer_ordering());
+    }
+    println!("HEVC_GEOMETRY fixture={input:?} outputArea={output_area} sourceArea={source_area} ctuArea={} declaredOrdering={:?} physicalPool=NOT_MEASURED",
+        output.prefix.coded_ctu_area(), output.prefix.declared_sublayer_ordering());
     let hvcc = generated.hvcc().unwrap();
     let request = cmaf_init::Request {
         track_id: 9,
@@ -190,6 +202,8 @@ fn compose(
     let output_width = columns.len();
     let mut stream = initialized.clone();
     let mut order = [Tracker::default(); 2];
+    let mut output_order = Tracker::default();
+    let mut dependency_trace = Vec::new();
     let mut frame = 0;
     for index in 0..50 / samples_per_fragment {
         let fragments = [0, 1]
@@ -229,6 +243,10 @@ fn compose(
                 });
                 assert_eq!(a_order, b_order);
                 assert!(order.iter().all(Tracker::has_reference));
+                dependency_trace.push((a_order, picture, first.references.clone()));
+                println!("HEVC_DEPENDENCY fixture={input:?} frame={frame} poc={} epoch={:?} temporalId={} nalType={} short={:?} long={:?}",
+                    a_order.poc, a_order.irap_epoch, picture.temporal_id_plus_one - 1, picture.nal_type,
+                    first.references.short_term_trace().collect::<Vec<_>>(), first.references.long_term_trace().collect::<Vec<_>>());
                 let mut nals = Vec::with_capacity(output_addresses.len());
                 for row in 0..rows.len() {
                     for feed in 0..2 {
@@ -290,9 +308,13 @@ fn compose(
         verify_configuration_cache(&tracks, &output_track, &parsed, &parameters);
         let actual = Fragment::parse(&fragment, &output_track).unwrap();
         assert_eq!(actual.sequence, sequence);
-        for (actual, source) in actual.samples.iter().zip(&parsed[0].samples) {
+        for ((actual, source), (expected_order, expected_picture, expected_refs)) in actual.samples.iter().zip(&parsed[0].samples).zip(dependency_trace.drain(..)) {
             assert_same_timing(actual, source);
-            picture_tiles(actual, output, &output_addresses);
+            let tiles = picture_tiles(actual, output, &output_addresses);
+            let picture = tiles[0].1.prefix.picture.unwrap();
+            assert_eq!(picture, expected_picture);
+            assert_eq!(output_order.advance(picture, output.prefix.poc_lsb_bits, index == 0 && source.decode_time == 0).unwrap(), expected_order);
+            assert!(tiles.iter().all(|(_, slice)| slice.references == expected_refs));
         }
         let mut leased_output = vec![0x93; expected.len()];
         let inputs = fragments.each_ref().map(Vec::as_slice);
