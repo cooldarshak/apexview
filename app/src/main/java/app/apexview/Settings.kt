@@ -114,6 +114,17 @@ class Settings(context: Context) {
         decoderLowLatencyTrial = value
         prefs.edit().putBoolean("decoderLowLatencyTrial", value).apply()
     }
+    // Independent archive-only admission trial, applied at player creation.
+    // Preserve the existing 55 MiB default and all mandatory time floors.
+    var archiveSoftBudgetMiB by mutableStateOf(
+        prefs.getInt("archiveSoftBudgetMiB", 55).takeIf { it in listOf(36, 48, 55) } ?: 55)
+        private set
+    fun updateArchiveSoftBudgetMiB(value: Int) {
+        require(value in listOf(36, 48, 55))
+        archiveSoftBudgetMiB = value
+        prefs.edit().putInt("archiveSoftBudgetMiB", value).apply()
+    }
+
     var independentTextureLatch by mutableStateOf(prefs.getBoolean("independentTextureLatch", true))
         private set
     fun updateIndependentTextureLatch(value: Boolean) {

@@ -4498,6 +4498,7 @@ class AppState(
         startMs = startMs,
         preferFastStart = preferFastStart,
         initialDecoderLowLatencyTrial = settings.decoderLowLatencyTrial,
+        initialArchiveSoftBudgetMiB = settings.archiveSoftBudgetMiB,
     ).also { if (castPlaybackHandedOff) it.suspendForRemotePlayback(true) }
 
     /**

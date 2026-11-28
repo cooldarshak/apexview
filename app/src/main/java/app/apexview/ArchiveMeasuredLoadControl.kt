@@ -19,6 +19,7 @@ import app.apexview.tiled.HevcArchiveVodSession
 internal class ArchiveMeasuredLoadControl(
     private val delegate: LoadControl,
     private val policy: ArchiveForwardBufferPolicy,
+    softBudgetMiB: Int = 55,
     private val allocatedBytes: () -> Long,
 ) : LoadControl {
     // Media3 1.11.1 uses Java default methods for the PlayerId-aware
@@ -47,7 +48,8 @@ internal class ArchiveMeasuredLoadControl(
 
     private val period = Timeline.Period()
     private val window = Timeline.Window()
-    private val bufferHold = ArchiveBufferHold()
+    private val bufferHold = ArchiveBufferHold(softBudgetMiB)
+    private var reportedOverflow = "NONE"
     private var reportedTarget = -1L
 
     override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean {
@@ -65,6 +67,20 @@ internal class ArchiveMeasuredLoadControl(
         val target = if (archive && !parameters.rebuffering &&
             !rebufferRecently && parameters.targetLiveOffsetUs == C.TIME_UNSET)
             policy.target(now, parameters.playbackSpeed) else null
+        val bytes = allocatedBytes()
+        // One scalar transition log, not a per-call history. Mandatory time
+        // coverage, unqualified delivery and in-flight loads may exceed the
+        // soft threshold. Never interpret it as a hard allocator cap.
+        val overflow = when {
+            !archive || bytes < bufferHold.softBudgetBytes -> "NONE"
+            target == null -> "DEFAULT_SAFETY_POLICY"
+            parameters.bufferedDurationUs < target.lowUs -> "MEASURED_TIME_FLOOR"
+            else -> "ALREADY_BUFFERED_OR_IN_FLIGHT"
+        }
+        if (overflow != reportedOverflow) {
+            reportedOverflow = overflow
+            android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_SOFT_BUDGET reason=$overflow allocatedBytes=$bytes budgetBytes=${bufferHold.softBudgetBytes} bufferedUs=${parameters.bufferedDurationUs}")
+        }
         if (target == null) {
             bufferHold.hold(null, 0L, 0L)
             if (reportedTarget != -1L) {
@@ -77,6 +93,6 @@ internal class ArchiveMeasuredLoadControl(
             reportedTarget = target.highUs
             android.util.Log.i("PitwallPlayback", "ARCHIVE_MEDIA3_BUFFER_POLICY targetUs=${target.highUs} lowUs=${target.lowUs} basis=MEASURED_SELECTED_CHILDREN_AND_UPSTREAM")
         }
-        return normal && !bufferHold.hold(target, parameters.bufferedDurationUs, allocatedBytes())
+        return normal && !bufferHold.hold(target, parameters.bufferedDurationUs, bytes)
     }
 }

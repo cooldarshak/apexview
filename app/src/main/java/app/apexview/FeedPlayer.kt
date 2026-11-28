@@ -137,6 +137,7 @@ class FeedPlayer(
     videoQuality: VideoQuality = VideoQuality.AUTO,
     preferFastStart: Boolean = false,
     initialDecoderLowLatencyTrial: Boolean = false,
+    initialArchiveSoftBudgetMiB: Int = 55,
 ) {
     /** Authorized per-channel F1 offer used by the DASH segment-only capture path. */
     internal val sourceStream: PlayInfo = stream
@@ -550,7 +551,8 @@ class FeedPlayer(
                 .setMediaSourceFactory(sources)
                 .setTrackSelector(sourceTrackSelector)
                 .setBandwidthMeter(androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.getSingletonInstance(context)),
-            playbackAllocator, PitwallPlayerMemoryPolicy.Role.FEED, archiveForwardBuffers)
+            playbackAllocator, PitwallPlayerMemoryPolicy.Role.FEED, archiveForwardBuffers,
+            initialArchiveSoftBudgetMiB)
         Media3MemoryOwners.register(playbackAllocator, "feed-$diagnosticId", sourceAllocations)
         val codecReleaseTiming = CodecReleaseTiming()
         var lastCodecReleaseLogNs = 0L

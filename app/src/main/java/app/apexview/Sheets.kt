@@ -510,6 +510,15 @@ fun SettingsScreen(app: AppState) {
                         "uses one EGL context with the same renderer and protection. Compare identical feeds and quality.",
                     style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
+                Text("Clear archive buffer budget (A/B)", style = Type.footnote,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                for (mib in listOf(36, 48, 55)) {
+                    ChoiceRow("$mib MiB" + if (mib == 55) " (existing default)" else " (trial)",
+                        s.archiveSoftBudgetMiB == mib) { s.updateArchiveSoftBudgetMiB(mib) }
+                }
+                Text("Next playback only. Soft admission threshold; startup, rebuffering, " +
+                    "selected quality and measured safe time coverage take priority.",
+                    style = Type.footnote, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                 SettingRow("Log status", DiagnosticLogs.status)
             }
         }

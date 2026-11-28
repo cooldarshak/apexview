@@ -21,6 +21,7 @@ internal object PitwallPlayerMemoryPolicy {
         allocator: DefaultAllocator,
         role: Role,
         archive: ArchiveForwardBufferPolicy? = null,
+        archiveSoftBudgetMiB: Int = 55,
     ): ExoPlayer {
         check((role == Role.FEED) == (archive != null))
         val control = DefaultLoadControl.Builder().setAllocator(allocator).apply {
@@ -33,7 +34,7 @@ internal object PitwallPlayerMemoryPolicy {
             }
         }.build()
         val selected: LoadControl = if (archive != null)
-            ArchiveMeasuredLoadControl(control, archive) { allocator.totalBytesAllocated.toLong() }
+            ArchiveMeasuredLoadControl(control, archive, archiveSoftBudgetMiB) { allocator.totalBytesAllocated.toLong() }
         else control
         return builder.setLoadControl(selected).build()
     }

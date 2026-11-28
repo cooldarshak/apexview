@@ -115,6 +115,22 @@ class ArchiveForwardBufferPolicyTest {
         assertFalse(hold.hold(target.copy(generation = 2L), 20_000_000L, 1L))
     }
 
+    @Test fun independentlySelectedByteTrialsPreserveTimeFloorAndGeneration() {
+        val target = ArchiveForwardBufferPolicy.Target(19_000_000L, 25_000_000L, 1L)
+        for (mib in listOf(36, 48, 55)) {
+            val hold = ArchiveBufferHold(mib)
+            val cap = mib.toLong() * 1024 * 1024
+            assertEquals(cap, hold.softBudgetBytes)
+            assertFalse(hold.hold(target, 20_000_000L, cap - 1))
+            assertFalse(hold.hold(target, 18_999_999L, cap))
+            assertTrue(hold.hold(target, 20_000_000L, cap))
+            assertTrue(hold.hold(target, 20_000_000L, cap - 1))
+            assertFalse(hold.hold(target.copy(generation = 2), 20_000_000L, cap - 1))
+            assertFalse(hold.hold(null, 30_000_000L, cap))
+        }
+        assertTrue(runCatching { ArchiveBufferHold(1) }.isFailure)
+    }
+
     @Test fun retiredProductionWindowCannotQualifyAnotherSession() {
         val policy = policy()
         policy.reset(true)

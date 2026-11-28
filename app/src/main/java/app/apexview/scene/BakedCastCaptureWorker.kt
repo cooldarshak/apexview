@@ -218,7 +218,7 @@ internal class BakedCastCaptureWorker(
             pbuffer = EGL14.EGL_NO_SURFACE
             contextGl = EGL14.EGL_NO_CONTEXT
             display = EGL14.EGL_NO_DISPLAY
-            SceneGraphicsOwners.process.remove(graphicsOwnerId)
+            SceneGraphicsOwners.process.remove(graphicsOwnerId, steps.failedCount)
             thread.quitSafely()
         }
     }
